@@ -71,6 +71,21 @@ export class KiloRouter {
   async initKiloRouter(signal?: AbortSignal): Promise<void> {
     if (this.initialized) return;
 
+    // Create an internal controller so we can abort probes on timeout
+    // instead of using Promise.race which leaves dangling unhandled
+    // promise rejections when the timeout fires.
+    const initController = new AbortController();
+    const timeoutId = setTimeout(() => initController.abort(), 15000);
+
+    // Propagate the external signal (e.g. handler-level AbortController)
+    // so probes are also cancelled when the caller aborts.
+    if (signal) {
+      if (signal.aborted) {
+        initController.abort();
+      }
+      signal.addEventListener("abort", () => initController.abort(), { once: true });
+    }
+
     try {
       const keys = readConfiguredKeys(KILO_KEY_ENV_NAMES);
       this.keyStates = keys.map((key, index) => ({
@@ -89,13 +104,13 @@ export class KiloRouter {
         lastSuccessAt: null,
       }));
 
-      await this.refreshKiloModels(true, signal);
+      await this.refreshKiloModels(true, initController.signal);
 
       const probePromises = this.keyStates.map(async (keyState) => {
         for (const modelCandidate of this.modelCandidates) {
-          if (signal?.aborted) break;
+          if (initController.signal.aborted || signal?.aborted) break;
           if (!modelCandidate.zeroCostVerified || !modelCandidate.available) continue;
-          const probe = await this.probeKeyModel(keyState, modelCandidate, signal);
+          const probe = await this.probeKeyModel(keyState, modelCandidate, initController.signal);
           if (probe.success) {
             keyState.available = true;
             keyState.inputPrice = probe.inputPrice ?? null;
@@ -108,16 +123,11 @@ export class KiloRouter {
         }
       });
 
-      await Promise.race([
-        Promise.all(probePromises),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("Kilo Router initialization timeout")), 15000)
-        )
-      ]);
+      await Promise.all(probePromises);
     } catch (error) {
-      if (signal?.aborted) throw error;
       console.error("Kilo init failed, continuing with available state:", error);
     } finally {
+      clearTimeout(timeoutId);
       this.initialized = true;
     }
   }
