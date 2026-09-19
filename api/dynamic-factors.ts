@@ -337,5 +337,13 @@ export default async function handler(req: Request): Promise<Response> {
 
 function urlSafeScope(url: URL): "global" | Region {
   const region = url.searchParams.get("region");
-  return region === null || region === "" ? "global" : (region as Region);
+  if (region === null || region === "") {
+    return "global";
+  }
+  // Validate that region is one of the allowed values
+  if (["asia", "europe", "africa", "americas", "oceania"].includes(region as Region)) {
+    return region as Region;
+  }
+  // Default to global for invalid regions
+  return "global";
 }
