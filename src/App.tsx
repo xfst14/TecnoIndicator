@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
+import { SpeedInsights } from "@vercel/speed-insights/react";
 import Navbar from "./components/Navbar";
 import Hero from "./components/Hero";
 import ForecastTool from "./components/ForecastTool";
@@ -65,6 +66,7 @@ export default function App() {
         <AboutSection />
       </main>
       <Footer lastUpdated={lastUpdated} />
+      <SpeedInsights />
     </div>
   );
 }
