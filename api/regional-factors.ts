@@ -224,6 +224,19 @@ function buildFallbackFactors(scope: Region, region: Region): Factor[] {
   }));
 }
 
+function timeoutPromise(ms: number): Promise<never> {
+  return new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error(`Analysis timed out after ${ms}ms`)), ms),
+  );
+}
+
+async function runFactorAnalysisWithTimeout(scope: Region, region: Region): Promise<Factor[]> {
+  return Promise.race([
+    runFactorAnalysis(scope, region),
+    timeoutPromise(50000),
+  ]);
+}
+
 async function runFactorAnalysis(scope: Region, region: Region): Promise<Factor[]> {
   const current = getCache<Factor[]>(`dynamic-factors:${scope}`, FACTORS_CACHE_MS);
   if (current) return current;
@@ -291,7 +304,7 @@ export default async function handler(req: Request): Promise<Response> {
         return Response.json({ factors: cached, scope: region, count: cached.length, aiCurated: true, cacheKey, updatedAt: new Date().toISOString() }, { status: 200 });
       }
     }
-    const factors = await runFactorAnalysis(region, region);
+    const factors = await runFactorAnalysisWithTimeout(region, region);
     setCache(cacheKey, factors, FACTORS_CACHE_MS);
     return Response.json({ factors, scope: region, count: factors.length, aiCurated: true, cacheKey, updatedAt: new Date().toISOString() }, { status: 200 });
   } catch (error) {

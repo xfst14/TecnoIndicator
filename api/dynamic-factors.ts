@@ -167,7 +167,7 @@ function normalizeFactor(raw: unknown, scope: "global" | Region, region: Region 
     magnitude,
     source: sourceUrl,
     bias,
-drift:
+    drift:
       f.drift && typeof f.drift === "object"
         ? {
             ...(typeof (f.drift as Record<string, unknown>).oil === "number" && Number.isFinite((f.drift as Record<string, unknown>).oil) ? { oil: (f.drift as Record<string, unknown>).oil as number } : {}),
@@ -244,6 +244,12 @@ function buildFallbackFactors(scope: "global" | Region, region: Region | null): 
   }));
 }
 
+function timeoutPromise(ms: number): Promise<never> {
+  return new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error(`Analysis timed out after ${ms}ms`)), ms),
+  );
+}
+
 async function runFactorAnalysis(scope: "global" | Region, region: Region | null): Promise<Factor[]> {
   const current = getCache<Factor[]>(`dynamic-factors:${scope}`, FACTORS_CACHE_MS);
   if (current) return current;
@@ -301,6 +307,13 @@ async function runFactorAnalysis(scope: "global" | Region, region: Region | null
   return replaceOldest(existing, normalized);
 }
 
+async function runFactorAnalysisWithTimeout(scope: "global" | Region, region: Region | null): Promise<Factor[]> {
+  return Promise.race([
+    runFactorAnalysis(scope, region),
+    timeoutPromise(50000),
+  ]);
+}
+
 export default async function handler(req: Request): Promise<Response> {
   try {
     const url = new URL(req.url);
@@ -318,7 +331,7 @@ export default async function handler(req: Request): Promise<Response> {
         return Response.json({ factors: cached, scope, count: cached.length, aiCurated: true, cacheKey, updatedAt: new Date().toISOString() }, { status: 200 });
       }
     }
-    const factors = await runFactorAnalysis(scope, isGlobal ? null : scope as Region);
+    const factors = await runFactorAnalysisWithTimeout(scope, isGlobal ? null : scope as Region);
     setCache(cacheKey, factors, FACTORS_CACHE_MS);
     return Response.json({ factors, scope, count: factors.length, aiCurated: true, cacheKey, updatedAt: new Date().toISOString() }, { status: 200 });
   } catch (error) {

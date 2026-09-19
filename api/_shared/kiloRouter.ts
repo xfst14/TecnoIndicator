@@ -380,12 +380,14 @@ export class KiloRouter {
     }
 
     const keys = this.keyStates
-      .filter(k => k.available && !k.rateLimited)
-      .map((_k, i) => i);
+      .map((k, i) => ({ k, i }))
+      .filter(({ k }) => k.available && !k.rateLimited)
+      .map(({ i }) => i);
 
     const models = this.modelCandidates
-      .filter(m => m.zeroCostVerified && m.available && !m.rateLimited)
-      .map((_m, i) => i);
+      .map((m, i) => ({ m, i }))
+      .filter(({ m }) => m.zeroCostVerified && m.available && !m.rateLimited)
+      .map(({ i }) => i);
 
     if (keys.length === 0 || models.length === 0) {
       throw new Error("No available Kilo Gateway key/model combinations");
@@ -523,8 +525,13 @@ const result: KiloResponse = {
           lastError = new Error(`Kilo request failed with status ${status}`);
         } catch (error) {
           lastError = error instanceof Error ? error : new Error(String(error));
-          keyState.available = false;
-          keyState.lastCheckedAt = new Date().toISOString();
+          if (keyState) {
+            keyState.available = false;
+            keyState.lastCheckedAt = new Date().toISOString();
+          }
+          if (modelCandidate) {
+            modelCandidate.lastCheckedAt = new Date().toISOString();
+          }
         }
       }
     }
