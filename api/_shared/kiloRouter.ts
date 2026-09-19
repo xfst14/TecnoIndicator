@@ -68,14 +68,15 @@ export class KiloRouter {
   private initialized: boolean = false;
   private catalogLastRefresh: string | null = null;
 
-  async initKiloRouter(signal?: AbortSignal): Promise<void> {
-    if (this.initialized) return;
+  async initKiloRouter(signal?: AbortSignal, force: boolean = false): Promise<void> {
+    if (this.initialized && !force) return;
+    if (force) this.initialized = false;
 
     // Create an internal controller so we can abort probes on timeout
     // instead of using Promise.race which leaves dangling unhandled
     // promise rejections when the timeout fires.
     const initController = new AbortController();
-    const timeoutId = setTimeout(() => initController.abort(), 15000);
+    const timeoutId = setTimeout(() => initController.abort(), 8000);
 
     // Propagate the external signal (e.g. handler-level AbortController)
     // so probes are also cancelled when the caller aborts.
@@ -148,7 +149,7 @@ export class KiloRouter {
       headers: {
         Accept: "application/json",
       },
-      signal: signal ?? AbortSignal.timeout(10000),
+      signal: signal ?? AbortSignal.timeout(8000),
     });
 
     if (!response.ok) {
@@ -262,7 +263,7 @@ export class KiloRouter {
           max_tokens: 4,
           temperature: 0,
         }),
-        signal: signal ?? AbortSignal.timeout(10000),
+              signal: signal ?? AbortSignal.timeout(5000),
       });
 
       const status = response.status;
@@ -444,7 +445,7 @@ export class KiloRouter {
               temperature: payload.temperature ?? 0.7,
               response_format: payload.response_format ?? undefined,
             }),
-            signal: signal ?? AbortSignal.timeout(20000),
+            signal: signal ?? AbortSignal.timeout(12000),
           });
 
           const status = response.status;

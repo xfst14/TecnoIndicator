@@ -75,7 +75,7 @@ export class TinyFishRouter {
           headers: {
             "X-API-Key": testKey,
           },
-          signal: signal ?? AbortSignal.timeout(5000),
+          signal: signal ?? AbortSignal.timeout(3000),
         });
 
         if (response.ok) {
@@ -180,12 +180,12 @@ export class TinyFishRouter {
         const region = options.region ?? "global";
         const regionPrefix = region !== "global" ? `[${region}] ` : "";
 
-        const response = await fetch(buildSearchUrl(`${regionPrefix}${query}`, options.limit ?? 10), {
-          headers: {
-            "X-API-Key": testKey,
-          },
-          signal: signal ?? AbortSignal.timeout(10000),
-        });
+const response = await fetch(buildSearchUrl(`${regionPrefix}${query}`, options.limit ?? 10), {
+            headers: {
+              "X-API-Key": testKey,
+            },
+            signal: signal ?? AbortSignal.timeout(6000),
+          });
 
         const status = response.status;
 
@@ -289,7 +289,7 @@ export class TinyFishRouter {
           body: JSON.stringify({
             urls: [safeUrl],
           }),
-          signal: signal ?? AbortSignal.timeout(10000),
+          signal: signal ?? AbortSignal.timeout(6000),
         });
 
         const status = response.status;
