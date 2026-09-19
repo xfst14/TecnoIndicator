@@ -244,19 +244,13 @@ function buildFallbackFactors(scope: "global" | Region, region: Region | null): 
   }));
 }
 
-function timeoutPromise(ms: number): Promise<never> {
-  return new Promise<never>((_, reject) =>
-    setTimeout(() => reject(new Error(`Analysis timed out after ${ms}ms`)), ms),
-  );
-}
-
-async function runFactorAnalysis(scope: "global" | Region, region: Region | null): Promise<Factor[]> {
+async function runFactorAnalysis(scope: "global" | Region, region: Region | null, signal?: AbortSignal): Promise<Factor[]> {
   const current = getCache<Factor[]>(`dynamic-factors:${scope}`, FACTORS_CACHE_MS);
   if (current) return current;
   const analytics = scope === "global" ? getGlobalAnalytics() : getRegionalAnalytics(region!);
   const existing = current ?? buildFallbackFactors(scope, region);
   const searchQuery = (REGION_QUERIES[region ?? "asia"] ?? GLOBAL_QUERIES)[0];
-  const search = await tinyfishRouter.tinyfishSearch(`${searchQuery} ${RECENT_MONTH()}`, { limit: 10, region: region ?? undefined });
+  const search = await tinyfishRouter.tinyfishSearch(`${searchQuery} ${RECENT_MONTH()}`, { limit: 10, region: region ?? undefined }, signal);
   const candidates = search.results
     .map((r) => ({ ...r, snippet: typeof r.snippet === "string" ? r.snippet : "" }))
     .filter((r) => isReputableSource(r.url) && isRecentPublishedAt(r.publishedAt))
@@ -265,7 +259,7 @@ async function runFactorAnalysis(scope: "global" | Region, region: Region | null
   const excerpts = await Promise.all(
     candidates.map(async (r) => {
       try {
-        const scraped = await tinyfishRouter.tinyfishScrape(r.url);
+        const scraped = await tinyfishRouter.tinyfishScrape(r.url, signal);
         return scraped
           ? { ...r, text: scraped.text, title: scraped.title || r.title }
           : r;
@@ -295,7 +289,7 @@ async function runFactorAnalysis(scope: "global" | Region, region: Region | null
     max_tokens: 4096,
     temperature: 0.2,
   };
-  const response = await kiloRouter.kiloInfer(payload);
+  const response = await kiloRouter.kiloInfer(payload, signal);
   const content = response.choices?.[0]?.message?.content ?? "";
   const parsed = safeParseJson<{ factors?: unknown[] }>(content);
   if (!parsed?.factors) return buildFallbackFactors(scope, region);
@@ -305,13 +299,6 @@ async function runFactorAnalysis(scope: "global" | Region, region: Region | null
     .filter((f) => f.scope === scope || (scope === "global" && f.regions?.includes("global")))
     .slice(0, MAX_FACTORS);
   return replaceOldest(existing, normalized);
-}
-
-async function runFactorAnalysisWithTimeout(scope: "global" | Region, region: Region | null): Promise<Factor[]> {
-  return Promise.race([
-    runFactorAnalysis(scope, region),
-    timeoutPromise(50000),
-  ]);
 }
 
 export default async function handler(req: Request): Promise<Response> {
@@ -331,9 +318,15 @@ export default async function handler(req: Request): Promise<Response> {
         return Response.json({ factors: cached, scope, count: cached.length, aiCurated: true, cacheKey, updatedAt: new Date().toISOString() }, { status: 200 });
       }
     }
-    const factors = await runFactorAnalysisWithTimeout(scope, isGlobal ? null : scope as Region);
-    setCache(cacheKey, factors, FACTORS_CACHE_MS);
-    return Response.json({ factors, scope, count: factors.length, aiCurated: true, cacheKey, updatedAt: new Date().toISOString() }, { status: 200 });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 45000);
+    try {
+      const factors = await runFactorAnalysis(scope, isGlobal ? null : scope as Region, controller.signal);
+      setCache(cacheKey, factors, FACTORS_CACHE_MS);
+      return Response.json({ factors, scope, count: factors.length, aiCurated: true, cacheKey, updatedAt: new Date().toISOString() }, { status: 200 });
+    } finally {
+      clearTimeout(timeoutId);
+    }
   } catch (error) {
     console.error("Dynamic factors error:", sanitizeError(String(error)));
     const scope = urlSafeScope(new URL(req.url));

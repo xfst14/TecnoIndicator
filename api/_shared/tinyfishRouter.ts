@@ -50,7 +50,7 @@ export class TinyFishRouter {
   private keyStates: TinyFishKeyState[] = [];
   private initialized: boolean = false;
 
-  async refreshTinyfishStatus(force: boolean = false): Promise<void> {
+  async refreshTinyfishStatus(force: boolean = false, signal?: AbortSignal): Promise<void> {
     if (!force && this.initialized && this.keyStates.length > 0) return;
 
     const keys = readConfiguredKeys(TINYFISH_KEY_ENV_NAMES);
@@ -75,7 +75,7 @@ export class TinyFishRouter {
           headers: {
             "X-API-Key": testKey,
           },
-          signal: AbortSignal.timeout(5000),
+          signal: signal ?? AbortSignal.timeout(5000),
         });
 
         if (response.ok) {
@@ -95,7 +95,8 @@ export class TinyFishRouter {
           keyState.lastCheckedAt = new Date().toISOString();
           this.parseRateLimitHeaders(keyState, response);
         }
-      } catch {
+      } catch (error) {
+        if (signal?.aborted) throw error;
         keyState.available = false;
         keyState.lastCheckedAt = new Date().toISOString();
       }
@@ -147,10 +148,11 @@ export class TinyFishRouter {
 
   async tinyfishSearch(
     query: string,
-    options: { limit?: number; region?: Region } = {}
+    options: { limit?: number; region?: Region } = {},
+    signal?: AbortSignal
   ): Promise<TinyFishSearchResponse> {
     if (!this.initialized) {
-      await this.refreshTinyfishStatus(true);
+      await this.refreshTinyfishStatus(true, signal);
     }
 
     const cacheKey = `tinyfish:search:${query}:${options.region ?? "global"}`;
@@ -161,6 +163,7 @@ export class TinyFishRouter {
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt < 3; attempt++) {
+      if (signal?.aborted) throw new Error("TinyFish search aborted");
       if (!keyState) {
         await this.backoff(attempt);
         keyState = this.selectKey();
@@ -181,7 +184,7 @@ export class TinyFishRouter {
           headers: {
             "X-API-Key": testKey,
           },
-          signal: AbortSignal.timeout(15000),
+          signal: signal ?? AbortSignal.timeout(10000),
         });
 
         const status = response.status;
@@ -232,6 +235,7 @@ export class TinyFishRouter {
 
         lastError = new Error(`TinyFish search failed with status ${status}`);
       } catch (error) {
+        if (signal?.aborted) throw error;
         lastError = error instanceof Error ? error : new Error(String(error));
       }
 
@@ -248,9 +252,9 @@ export class TinyFishRouter {
     return { results: [], total: 0, keyIndex: -1 };
   }
 
-  async tinyfishScrape(url: string): Promise<ScrapedContent | null> {
+  async tinyfishScrape(url: string, signal?: AbortSignal): Promise<ScrapedContent | null> {
     if (!this.initialized) {
-      await this.refreshTinyfishStatus(true);
+      await this.refreshTinyfishStatus(true, signal);
     }
 
     const safeUrl = url;
@@ -262,6 +266,7 @@ export class TinyFishRouter {
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt < 3; attempt++) {
+      if (signal?.aborted) throw new Error("TinyFish scrape aborted");
       if (!keyState) {
         await this.backoff(attempt);
         keyState = this.selectKey();
@@ -284,7 +289,7 @@ export class TinyFishRouter {
           body: JSON.stringify({
             urls: [safeUrl],
           }),
-          signal: AbortSignal.timeout(15000),
+          signal: signal ?? AbortSignal.timeout(10000),
         });
 
         const status = response.status;
@@ -324,11 +329,18 @@ export class TinyFishRouter {
 
         lastError = new Error(`TinyFish scrape failed with status ${status}`);
       } catch (error) {
+        if (signal?.aborted) throw error;
         lastError = error instanceof Error ? error : new Error(String(error));
       }
 
       keyState = this.selectKey();
     }
+
+    const cachedFallback = getCache<ScrapedContent>(
+      cacheKey,
+      10 * 60 * 1000
+    );
+    if (cachedFallback) return cachedFallback;
 
     console.error("TinyFish scrape failed:", lastError?.message);
     return null;

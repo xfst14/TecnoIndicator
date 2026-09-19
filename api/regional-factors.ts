@@ -224,26 +224,13 @@ function buildFallbackFactors(scope: Region, region: Region): Factor[] {
   }));
 }
 
-function timeoutPromise(ms: number): Promise<never> {
-  return new Promise<never>((_, reject) =>
-    setTimeout(() => reject(new Error(`Analysis timed out after ${ms}ms`)), ms),
-  );
-}
-
-async function runFactorAnalysisWithTimeout(scope: Region, region: Region): Promise<Factor[]> {
-  return Promise.race([
-    runFactorAnalysis(scope, region),
-    timeoutPromise(50000),
-  ]);
-}
-
-async function runFactorAnalysis(scope: Region, region: Region): Promise<Factor[]> {
+async function runFactorAnalysis(scope: Region, region: Region, signal?: AbortSignal): Promise<Factor[]> {
   const current = getCache<Factor[]>(`dynamic-factors:${scope}`, FACTORS_CACHE_MS);
   if (current) return current;
   const analytics = getRegionalAnalytics(region);
   const existing = current ?? buildFallbackFactors(scope, region);
   const searchQuery = REGION_QUERIES[region][0];
-  const search = await tinyfishRouter.tinyfishSearch(`${searchQuery} ${RECENT_MONTH()}`, { limit: 10, region });
+  const search = await tinyfishRouter.tinyfishSearch(`${searchQuery} ${RECENT_MONTH()}`, { limit: 10, region }, signal);
   const candidates = search.results
     .map((r) => ({ ...r, snippet: typeof r.snippet === "string" ? r.snippet : "" }))
     .filter((r) => isReputableSource(r.url) && isRecentPublishedAt(r.publishedAt))
@@ -252,7 +239,7 @@ async function runFactorAnalysis(scope: Region, region: Region): Promise<Factor[
   const excerpts = await Promise.all(
     candidates.map(async (r) => {
       try {
-        const scraped = await tinyfishRouter.tinyfishScrape(r.url);
+        const scraped = await tinyfishRouter.tinyfishScrape(r.url, signal);
         return scraped ? { ...r, text: scraped.text, title: scraped.title || r.title } : r;
       } catch {
         return r;
@@ -276,7 +263,7 @@ async function runFactorAnalysis(scope: Region, region: Region): Promise<Factor[
     max_tokens: 4096,
     temperature: 0.2,
   };
-  const response = await kiloRouter.kiloInfer(payload);
+  const response = await kiloRouter.kiloInfer(payload, signal);
   const content = response.choices?.[0]?.message?.content ?? "";
   const parsed = safeParseJson<{ factors?: unknown[] }>(content);
   if (!parsed?.factors) return buildFallbackFactors(scope, region);
@@ -304,9 +291,15 @@ export default async function handler(req: Request): Promise<Response> {
         return Response.json({ factors: cached, scope: region, count: cached.length, aiCurated: true, cacheKey, updatedAt: new Date().toISOString() }, { status: 200 });
       }
     }
-    const factors = await runFactorAnalysisWithTimeout(region, region);
-    setCache(cacheKey, factors, FACTORS_CACHE_MS);
-    return Response.json({ factors, scope: region, count: factors.length, aiCurated: true, cacheKey, updatedAt: new Date().toISOString() }, { status: 200 });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 45000);
+    try {
+      const factors = await runFactorAnalysis(region, region, controller.signal);
+      setCache(cacheKey, factors, FACTORS_CACHE_MS);
+      return Response.json({ factors, scope: region, count: factors.length, aiCurated: true, cacheKey, updatedAt: new Date().toISOString() }, { status: 200 });
+    } finally {
+      clearTimeout(timeoutId);
+    }
   } catch (error) {
     console.error("Regional factors error:", sanitizeError(String(error)));
     const regionParam = new URL(req.url).searchParams.get("region");

@@ -68,58 +68,61 @@ export class KiloRouter {
   private initialized: boolean = false;
   private catalogLastRefresh: string | null = null;
 
-async initKiloRouter(): Promise<void> {
-  if (this.initialized) return;
+  async initKiloRouter(signal?: AbortSignal): Promise<void> {
+    if (this.initialized) return;
 
-  const keys = readConfiguredKeys(KILO_KEY_ENV_NAMES);
-  this.keyStates = keys.map((key, index) => ({
-    keyIndex: index,
-    envName: key.envName,
-    endpointUrl: KILO_GATEWAY_CHAT_URL,
-    inputPrice: null,
-    outputPrice: null,
-    zeroCostVerified: false,
-    available: false,
-    rateLimited: false,
-    rateLimitScope: null,
-    rateLimitRemaining: null,
-    rateLimitResetAt: null,
-    lastCheckedAt: new Date().toISOString(),
-    lastSuccessAt: null,
-  }));
+    try {
+      const keys = readConfiguredKeys(KILO_KEY_ENV_NAMES);
+      this.keyStates = keys.map((key, index) => ({
+        keyIndex: index,
+        envName: key.envName,
+        endpointUrl: KILO_GATEWAY_CHAT_URL,
+        inputPrice: null,
+        outputPrice: null,
+        zeroCostVerified: false,
+        available: false,
+        rateLimited: false,
+        rateLimitScope: null,
+        rateLimitRemaining: null,
+        rateLimitResetAt: null,
+        lastCheckedAt: new Date().toISOString(),
+        lastSuccessAt: null,
+      }));
 
-  await this.refreshKiloModels(true);
+      await this.refreshKiloModels(true, signal);
 
-  // Probe keys in parallel to stay within function timeout
-  // Each key probes models sequentially until one works (or all tried)
-  const probePromises = this.keyStates.map(async (keyState) => {
-    for (const modelCandidate of this.modelCandidates) {
-      if (!modelCandidate.zeroCostVerified || !modelCandidate.available) continue;
-      const probe = await this.probeKeyModel(keyState, modelCandidate);
-      if (probe.success) {
-        keyState.available = true;
-        keyState.inputPrice = probe.inputPrice ?? null;
-        keyState.outputPrice = probe.outputPrice ?? null;
-        keyState.zeroCostVerified = true;
-        keyState.lastCheckedAt = new Date().toISOString();
-        keyState.lastSuccessAt = keyState.lastCheckedAt;
-        break; // One successful model per key is enough
-      }
+      const probePromises = this.keyStates.map(async (keyState) => {
+        for (const modelCandidate of this.modelCandidates) {
+          if (signal?.aborted) break;
+          if (!modelCandidate.zeroCostVerified || !modelCandidate.available) continue;
+          const probe = await this.probeKeyModel(keyState, modelCandidate, signal);
+          if (probe.success) {
+            keyState.available = true;
+            keyState.inputPrice = probe.inputPrice ?? null;
+            keyState.outputPrice = probe.outputPrice ?? null;
+            keyState.zeroCostVerified = true;
+            keyState.lastCheckedAt = new Date().toISOString();
+            keyState.lastSuccessAt = keyState.lastCheckedAt;
+            break;
+          }
+        }
+      });
+
+      await Promise.race([
+        Promise.all(probePromises),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Kilo Router initialization timeout")), 15000)
+        )
+      ]);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      console.error("Kilo init failed, continuing with available state:", error);
+    } finally {
+      this.initialized = true;
     }
-  });
+  }
 
-  // Hard timeout for entire initialization to prevent function timeout
-  await Promise.race([
-    Promise.all(probePromises),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("Kilo Router initialization timeout")), 30000)
-    )
-  ]);
-
-  this.initialized = true;
-}
-
-async refreshKiloModels(force: boolean = false): Promise<void> {
+  async refreshKiloModels(force: boolean = false, signal?: AbortSignal): Promise<void> {
   const cached = getCache<{ models: KiloModelCatalogEntry[]; timestamp: number }>(
     "kilo:model-catalog",
     MODEL_CACHE_MS
@@ -135,7 +138,7 @@ async refreshKiloModels(force: boolean = false): Promise<void> {
       headers: {
         Accept: "application/json",
       },
-      signal: AbortSignal.timeout(10000), // 10s timeout for model catalog
+      signal: signal ?? AbortSignal.timeout(10000),
     });
 
     if (!response.ok) {
@@ -209,7 +212,8 @@ async refreshKiloModels(force: boolean = false): Promise<void> {
 
   private async probeKeyModel(
     keyState: KiloKeyState,
-    modelCandidate: ModelCandidate
+    modelCandidate: ModelCandidate,
+    signal?: AbortSignal
   ): Promise<{
     success: boolean;
     inputPrice?: number | null;
@@ -248,7 +252,7 @@ async refreshKiloModels(force: boolean = false): Promise<void> {
           max_tokens: 4,
           temperature: 0,
         }),
-        signal: AbortSignal.timeout(10000),
+        signal: signal ?? AbortSignal.timeout(10000),
       });
 
       const status = response.status;
@@ -376,17 +380,18 @@ async refreshKiloModels(force: boolean = false): Promise<void> {
     return null;
   }
 
-  async kiloInfer(payload: any): Promise<KiloResponse> {
+  async kiloInfer(payload: any, signal?: AbortSignal): Promise<KiloResponse> {
     if (!this.initialized) {
-      await this.initKiloRouter();
+      await this.initKiloRouter(signal);
     }
 
-    // Force refresh before returning complete Kilo-unavailable
+    if (signal?.aborted) throw new Error("Kilo inference aborted");
+
     const hasAnyUsable = this.keyStates.some(k => k.available && !k.rateLimited) &&
       this.modelCandidates.some(m => m.zeroCostVerified && m.available && !m.rateLimited);
 
     if (!hasAnyUsable) {
-      await this.refreshKiloModels(true);
+      await this.refreshKiloModels(true, signal);
     }
 
     const keys = this.keyStates
@@ -410,6 +415,7 @@ async refreshKiloModels(force: boolean = false): Promise<void> {
     let lastError: Error | null = null;
 
     for (const keyIndex of shuffledKeys) {
+      if (signal?.aborted) throw new Error("Kilo inference aborted");
       const keyState = this.keyStates[keyIndex];
       for (const modelIndex of shuffledModels) {
         const modelCandidate = this.modelCandidates[modelIndex];
@@ -428,7 +434,7 @@ async refreshKiloModels(force: boolean = false): Promise<void> {
               temperature: payload.temperature ?? 0.7,
               response_format: payload.response_format ?? undefined,
             }),
-            signal: AbortSignal.timeout(45000),
+            signal: signal ?? AbortSignal.timeout(20000),
           });
 
           const status = response.status;
@@ -534,6 +540,7 @@ const result: KiloResponse = {
 
           lastError = new Error(`Kilo request failed with status ${status}`);
         } catch (error) {
+          if (signal?.aborted) throw error;
           lastError = error instanceof Error ? error : new Error(String(error));
           if (keyState) {
             keyState.available = false;
