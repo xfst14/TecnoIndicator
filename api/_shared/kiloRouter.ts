@@ -68,84 +68,94 @@ export class KiloRouter {
   private initialized: boolean = false;
   private catalogLastRefresh: string | null = null;
 
-  async initKiloRouter(): Promise<void> {
-    if (this.initialized) return;
+async initKiloRouter(): Promise<void> {
+  if (this.initialized) return;
 
-    const keys = readConfiguredKeys(KILO_KEY_ENV_NAMES);
-    this.keyStates = keys.map((key, index) => ({
-      keyIndex: index,
-      envName: key.envName,
-      endpointUrl: KILO_GATEWAY_CHAT_URL,
-      inputPrice: null,
-      outputPrice: null,
-      zeroCostVerified: false,
-      available: false,
-      rateLimited: false,
-      rateLimitScope: null,
-      rateLimitRemaining: null,
-      rateLimitResetAt: null,
-      lastCheckedAt: new Date().toISOString(),
-      lastSuccessAt: null,
-    }));
+  const keys = readConfiguredKeys(KILO_KEY_ENV_NAMES);
+  this.keyStates = keys.map((key, index) => ({
+    keyIndex: index,
+    envName: key.envName,
+    endpointUrl: KILO_GATEWAY_CHAT_URL,
+    inputPrice: null,
+    outputPrice: null,
+    zeroCostVerified: false,
+    available: false,
+    rateLimited: false,
+    rateLimitScope: null,
+    rateLimitRemaining: null,
+    rateLimitResetAt: null,
+    lastCheckedAt: new Date().toISOString(),
+    lastSuccessAt: null,
+  }));
 
-    await this.refreshKiloModels(true);
+  await this.refreshKiloModels(true);
 
-    // Probe every configured key against eligible zero-cost models
-    for (const keyState of this.keyStates) {
-      for (const modelCandidate of this.modelCandidates) {
-        if (!modelCandidate.zeroCostVerified || !modelCandidate.available) continue;
-        const probe = await this.probeKeyModel(keyState, modelCandidate);
-        if (probe.success) {
-          keyState.available = true;
-          keyState.inputPrice = probe.inputPrice ?? null;
-          keyState.outputPrice = probe.outputPrice ?? null;
-          keyState.zeroCostVerified = true;
-          keyState.lastCheckedAt = new Date().toISOString();
-          keyState.lastSuccessAt = keyState.lastCheckedAt;
-          break; // One successful model per key is enough
-        }
+  // Probe keys in parallel to stay within function timeout
+  // Each key probes models sequentially until one works (or all tried)
+  const probePromises = this.keyStates.map(async (keyState) => {
+    for (const modelCandidate of this.modelCandidates) {
+      if (!modelCandidate.zeroCostVerified || !modelCandidate.available) continue;
+      const probe = await this.probeKeyModel(keyState, modelCandidate);
+      if (probe.success) {
+        keyState.available = true;
+        keyState.inputPrice = probe.inputPrice ?? null;
+        keyState.outputPrice = probe.outputPrice ?? null;
+        keyState.zeroCostVerified = true;
+        keyState.lastCheckedAt = new Date().toISOString();
+        keyState.lastSuccessAt = keyState.lastCheckedAt;
+        break; // One successful model per key is enough
       }
     }
+  });
 
-    this.initialized = true;
+  // Hard timeout for entire initialization to prevent function timeout
+  await Promise.race([
+    Promise.all(probePromises),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Kilo Router initialization timeout")), 30000)
+    )
+  ]);
+
+  this.initialized = true;
+}
+
+async refreshKiloModels(force: boolean = false): Promise<void> {
+  const cached = getCache<{ models: KiloModelCatalogEntry[]; timestamp: number }>(
+    "kilo:model-catalog",
+    MODEL_CACHE_MS
+  );
+
+  if (!force && cached && Date.now() - cached.timestamp < MODEL_CACHE_MS) {
+    this.modelCandidates = this.buildCandidatePool(cached.models);
+    return;
   }
 
-  async refreshKiloModels(force: boolean = false): Promise<void> {
-    const cached = getCache<{ models: KiloModelCatalogEntry[]; timestamp: number }>(
-      "kilo:model-catalog",
-      MODEL_CACHE_MS
-    );
+  try {
+    const response = await fetch(KILO_GATEWAY_MODELS_URL, {
+      headers: {
+        Accept: "application/json",
+      },
+      signal: AbortSignal.timeout(10000), // 10s timeout for model catalog
+    });
 
-    if (!force && cached && Date.now() - cached.timestamp < MODEL_CACHE_MS) {
-      this.modelCandidates = this.buildCandidatePool(cached.models);
-      return;
+    if (!response.ok) {
+      throw new Error(`Model catalog request failed with status ${response.status}`);
     }
 
-    try {
-      const response = await fetch(KILO_GATEWAY_MODELS_URL, {
-        headers: {
-          Accept: "application/json",
-        },
-      });
+    const data = await response.json();
+    const models: KiloModelCatalogEntry[] = Array.isArray(data.data)
+      ? data.data
+      : Array.isArray(data)
+        ? data
+        : [];
 
-      if (!response.ok) {
-        throw new Error(`Model catalog request failed with status ${response.status}`);
-      }
-
-      const data = await response.json();
-      const models: KiloModelCatalogEntry[] = Array.isArray(data.data)
-        ? data.data
-        : Array.isArray(data)
-          ? data
-          : [];
-
-      this.modelCandidates = this.buildCandidatePool(models);
-      this.catalogLastRefresh = new Date().toISOString();
-      setCache("kilo:model-catalog", { models, timestamp: Date.now() }, MODEL_CACHE_MS);
-    } catch (error) {
-      console.error("Kilo model catalog refresh failed:", error);
-    }
+    this.modelCandidates = this.buildCandidatePool(models);
+    this.catalogLastRefresh = new Date().toISOString();
+    setCache("kilo:model-catalog", { models, timestamp: Date.now() }, MODEL_CACHE_MS);
+  } catch (error) {
+    console.error("Kilo model catalog refresh failed:", error);
   }
+}
 
   private buildCandidatePool(models: KiloModelCatalogEntry[]): ModelCandidate[] {
     const candidates: ModelCandidate[] = [];
