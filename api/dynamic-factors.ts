@@ -249,7 +249,7 @@ async function runFactorAnalysis(scope: "global" | Region, region: Region | null
   if (current) return current;
   const analytics = scope === "global" ? getGlobalAnalytics() : getRegionalAnalytics(region!);
   const existing = current ?? buildFallbackFactors(scope, region);
-  const searchQuery = (REGION_QUERIES[region ?? "asia"] ?? GLOBAL_QUERIES)[0];
+  const searchQuery = (scope === "global" ? GLOBAL_QUERIES : REGION_QUERIES[region ?? "asia"])[0];
   const search = await tinyfishRouter.tinyfishSearch(`${searchQuery} ${RECENT_MONTH()}`, { limit: 10, region: region ?? undefined }, signal);
   const candidates = search.results
     .map((r) => ({ ...r, snippet: typeof r.snippet === "string" ? r.snippet : "" }))
@@ -329,9 +329,14 @@ export default async function handler(req: Request): Promise<Response> {
     }
   } catch (error) {
     console.error("Dynamic factors error:", sanitizeError(String(error)));
-    const scope = urlSafeScope(new URL(req.url));
-    const fallback = buildFallbackFactors(scope, scope === "global" ? null : scope);
-    return Response.json({ factors: fallback, scope, count: fallback.length, aiCurated: false, cacheKey: `dynamic-factors:${scope}`, updatedAt: new Date().toISOString(), error: "Dynamic factors temporarily unavailable; static fallbacks returned" }, { status: 200 });
+    try {
+      const scope = urlSafeScope(new URL(req.url));
+      const fallback = buildFallbackFactors(scope, scope === "global" ? null : scope);
+      return Response.json({ factors: fallback, scope, count: fallback.length, aiCurated: false, cacheKey: `dynamic-factors:${scope}`, updatedAt: new Date().toISOString(), error: "Dynamic factors temporarily unavailable; static fallbacks returned" }, { status: 200 });
+    } catch (handleError) {
+      console.error("Dynamic factors error handling failed:", sanitizeError(String(handleError)));
+      return Response.json({ factors: [], scope: "global", count: 0, aiCurated: false, cacheKey: "dynamic-factors:global", updatedAt: new Date().toISOString(), error: "Dynamic factors temporarily unavailable; static fallbacks returned" }, { status: 200 });
+    }
   }
 }
 

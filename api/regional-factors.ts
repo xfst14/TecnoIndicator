@@ -302,9 +302,14 @@ export default async function handler(req: Request): Promise<Response> {
     }
   } catch (error) {
     console.error("Regional factors error:", sanitizeError(String(error)));
-    const regionParam = new URL(req.url).searchParams.get("region");
-    const region = isRegion(regionParam) ? (regionParam as Region) : "asia";
-    const fallback = buildFallbackFactors(region, region);
-    return Response.json({ factors: fallback, scope: region, count: fallback.length, aiCurated: false, cacheKey: `dynamic-factors:${region}`, updatedAt: new Date().toISOString(), error: "Regional factors temporarily unavailable; static fallbacks returned" }, { status: 200 });
+    try {
+      const regionParam = new URL(req.url).searchParams.get("region");
+      const region = isRegion(regionParam) ? (regionParam as Region) : "asia";
+      const fallback = buildFallbackFactors(region, region);
+      return Response.json({ factors: fallback, scope: region, count: fallback.length, aiCurated: false, cacheKey: `dynamic-factors:${region}`, updatedAt: new Date().toISOString(), error: "Regional factors temporarily unavailable; static fallbacks returned" }, { status: 200 });
+    } catch (handleError) {
+      console.error("Regional factors error handling failed:", sanitizeError(String(handleError)));
+      return Response.json({ factors: [], scope: "asia", count: 0, aiCurated: false, cacheKey: "dynamic-factors:asia", updatedAt: new Date().toISOString(), error: "Regional factors temporarily unavailable; static fallbacks returned" }, { status: 200 });
+    }
   }
 }
