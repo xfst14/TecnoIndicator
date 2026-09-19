@@ -416,7 +416,7 @@ export class KiloRouter {
               temperature: payload.temperature ?? 0.7,
               response_format: payload.response_format ?? undefined,
             }),
-            signal: AbortSignal.timeout(60000),
+            signal: AbortSignal.timeout(45000),
           });
 
           const status = response.status;

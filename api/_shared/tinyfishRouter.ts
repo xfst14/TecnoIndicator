@@ -65,16 +65,17 @@ export class TinyFishRouter {
       lastSuccessAt: null,
     }));
 
-    for (const keyState of this.keyStates) {
+    // Verify keys in parallel to stay within the function timeout
+    await Promise.all(this.keyStates.map(async (keyState) => {
       try {
         const testKey = process.env[keyState.envName];
-        if (!testKey) continue;
+        if (!testKey) return;
 
         const response = await fetch(buildSearchUrl("test", 1), {
           headers: {
             "X-API-Key": testKey,
           },
-          signal: AbortSignal.timeout(10000),
+          signal: AbortSignal.timeout(5000),
         });
 
         if (response.ok) {
@@ -98,7 +99,7 @@ export class TinyFishRouter {
         keyState.available = false;
         keyState.lastCheckedAt = new Date().toISOString();
       }
-    }
+    }));
 
     this.initialized = true;
   }
@@ -180,7 +181,7 @@ export class TinyFishRouter {
           headers: {
             "X-API-Key": testKey,
           },
-          signal: AbortSignal.timeout(30000),
+          signal: AbortSignal.timeout(15000),
         });
 
         const status = response.status;
@@ -283,7 +284,7 @@ export class TinyFishRouter {
           body: JSON.stringify({
             urls: [safeUrl],
           }),
-          signal: AbortSignal.timeout(30000),
+          signal: AbortSignal.timeout(15000),
         });
 
         const status = response.status;
