@@ -44,9 +44,10 @@ const STATS = [
 
 interface HeroProps {
   prices: Record<CommodityId, number>;
+  deltas: Record<CommodityId, number>;
 }
 
-export default function Hero({ prices }: HeroProps) {
+export default function Hero({ prices, deltas }: HeroProps) {
   const today = new Date();
   const commodityRows: Array<{
     id: CommodityId;
@@ -268,7 +269,7 @@ export default function Hero({ prices }: HeroProps) {
         </Reveal>
       </div>
 
-      <Ticker prices={prices} />
+      <Ticker prices={prices} deltas={deltas} />
     </section>
   );
 }

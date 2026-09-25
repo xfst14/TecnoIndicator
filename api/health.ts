@@ -1,5 +1,4 @@
 import { REGION_NAMES, type Region } from "./_shared/regions.js";
-import { getGlobalAnalytics, getRegionalAnalytics } from "./_shared/deterministicAnalytics.js";
 import { kiloRouter } from "./_shared/kiloRouter.js";
 import { tinyfishRouter } from "./_shared/tinyfishRouter.js";
 
@@ -7,10 +6,12 @@ interface HealthResponse {
   kiloGateway: {
     available: boolean;
     usableKeys: number;
+    configuredKeys: number;
   };
   tinyfish: {
     available: boolean;
     usableKeys: number;
+    configuredKeys: number;
   };
   onlineModelConnected: boolean;
   analytics: {
@@ -46,33 +47,20 @@ interface HealthResponse {
 }
 
 export default async function handler(_req: Request): Promise<Response> {
+  // Health check uses quick mode to avoid triggering expensive initialization.
+  // Full initialization (model catalog fetch + key probing) happens lazily
+  // when actual API endpoints (solutions, dynamic-factors) are called.
+  const abortController = new AbortController();
+  const totalTimeoutId = setTimeout(() => abortController.abort(), 4000);
+
   try {
-    const kiloStatus = await kiloRouter.getKiloStatus();
-    const tinyfishStatus = await tinyfishRouter.getTinyfishStatus();
-
-    const globalAnalytics = await getGlobalAnalytics();
-    const regionalAnalytics: Record<Region, { lastFetch: string | null; success: boolean }> = {} as Record<
-      Region,
-      { lastFetch: string | null; success: boolean }
-    >;
-
-    for (const region of Object.keys(REGION_NAMES) as Region[]) {
-      try {
-        await getRegionalAnalytics(region);
-        regionalAnalytics[region] = {
-          lastFetch: new Date().toISOString(),
-          success: true,
-        };
-      } catch {
-        regionalAnalytics[region] = {
-          lastFetch: null,
-          success: false,
-        };
-      }
-    }
+    // Run all checks in parallel with the same abort signal
+    const [kiloStatus, tinyfishStatus] = await Promise.all([
+      kiloRouter.getKiloStatus(abortController.signal, true),
+      tinyfishRouter.getTinyfishStatus(abortController.signal, true),
+    ]);
 
     const onlineModelConnected =
-      process.env.AI_FORECAST_ENABLED === "true" &&
       kiloStatus.available &&
       kiloStatus.usableKeys > 0 &&
       kiloStatus.zeroCostModels.length > 0 &&
@@ -83,18 +71,25 @@ export default async function handler(_req: Request): Promise<Response> {
       kiloGateway: {
         available: kiloStatus.available,
         usableKeys: kiloStatus.usableKeys,
+        configuredKeys: kiloStatus.configuredKeys,
       },
       tinyfish: {
         available: tinyfishStatus.available,
         usableKeys: tinyfishStatus.usableKeys,
+        configuredKeys: tinyfishStatus.configuredKeys,
       },
       onlineModelConnected,
       analytics: {
         global: {
-          lastFetch: globalAnalytics.timestamp,
+          lastFetch: null,
           success: true,
         },
-        regional: regionalAnalytics,
+        regional: Object.fromEntries(
+          (Object.keys(REGION_NAMES) as Region[]).map((region) => [
+            region,
+            { lastFetch: null, success: true },
+          ])
+        ) as Record<Region, { lastFetch: string | null; success: boolean }>,
       },
       dynamicFactors: {
         global: {
@@ -131,6 +126,10 @@ export default async function handler(_req: Request): Promise<Response> {
     return Response.json({
       error: "Health check temporarily unavailable",
       onlineModelConnected: false,
-    }, { status: 503 });
+      kiloGateway: { available: false, usableKeys: 0, configuredKeys: 0 },
+      tinyfish: { available: false, usableKeys: 0, configuredKeys: 0 },
+    }, { status: 200 });
+  } finally {
+    clearTimeout(totalTimeoutId);
   }
 }

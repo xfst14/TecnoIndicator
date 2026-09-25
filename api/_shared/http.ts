@@ -24,11 +24,12 @@ export const TINYFISH_KEY_ENV_NAMES = [
 
 export const FACTOR_COUNT = 8;
 export const ANALYTICS_CACHE_MS = 60_000;
-export const FACTORS_CACHE_MS = 10 * 60_000;
-export const SEARCH_CACHE_MS = 10 * 60_000;
+export const FACTORS_CACHE_MS = 60_000;
+export const SEARCH_CACHE_MS = 60_000;
 export const MODEL_CACHE_MS = 60_000;
 export const ACCESS_PROBE_CACHE_MS = 5 * 60_000;
 export const FORECAST_CACHE_MS = 5 * 60_000;
+export const SOLUTIONS_CACHE_MS = 60_000;
 export const GLOBAL_RATE_LIMIT_BACKOFF_MS = [1000, 2000, 4000];
 
 export interface ConfiguredKey {
@@ -81,4 +82,79 @@ export function isGlobalRateLimitStatus(status: number): boolean {
 
 export function isAccessDeniedStatus(status: number): boolean {
   return status === 401 || status === 403;
+}
+
+export const REPUTABLE_HOSTS = [
+  "opec.org",
+  "iea.org",
+  "eia.gov",
+  "worldbank.org",
+  "un.org",
+  "unep.org",
+  "wri.org",
+  "wrm.org",
+  "oecd.org",
+  "imf.org",
+  "reuters.com",
+  "apnews.com",
+  "ft.com",
+  "bloomberg.com",
+  "energy.gov",
+  "eurostat.europa.eu",
+  "afdb.org",
+  "adb.org",
+  "asean.org",
+  "europa.eu",
+  "gov.au",
+  "govt.nz",
+  "gov.za",
+  "gov.ng",
+  "gov.in",
+  "gov.cn",
+  "gov.br",
+  "gov.mx",
+  "gov.ar",
+  "gov.eg",
+  "gov.ae",
+  "gov.sa",
+  "gov.qa",
+  "gov.tr",
+  "gov.id",
+  "gov.my",
+  "gov.ph",
+  "gov.vn",
+  "ieeewrc.org",
+  "irena.org",
+  "cdn.irena.org",
+  "globalpetrolprices.com",
+  "waterplaza.nl",
+  "waterworld.com",
+  "wateronline.com",
+  "energyinst.org",
+  "enerdata.net",
+  "platts.com",
+  "gulfnews.com",
+  "thenationalnews.com",
+  "thegazette.co.jm",
+  "businessday.ng",
+  "allafrica.com",
+  "africanews.com",
+  "screendaily.com",
+];
+
+export function isReputableSource(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return REPUTABLE_HOSTS.some((prefix) => host === prefix || host.endsWith(`.${prefix}`));
+  } catch {
+    return false;
+  }
+}
+
+export function isRecentPublishedAt(value: string | undefined): boolean {
+  if (!value) return true;
+  const date = Date.parse(value);
+  if (Number.isNaN(date)) return true;
+  const cutoff = Date.now() - 180 * 24 * 60 * 60 * 1000;
+  return date >= cutoff;
 }

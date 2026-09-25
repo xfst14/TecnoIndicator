@@ -3,11 +3,25 @@ import Navbar from "./components/Navbar";
 import Hero from "./components/Hero";
 import ForecastTool from "./components/ForecastTool";
 import RegionalEvaluation from "./components/RegionalEvaluation";
-import FactorsSection from "./components/FactorsSection";
+import SolutionsSection from "./components/SolutionsSection";
 import AboutSection from "./components/AboutSection";
 import Footer from "./components/Footer";
 import { useLiveMarket } from "./hook/useLiveMarket";
-import { generateForecast, type RegionId, FACTORS, REGIONAL_FACTORS, EVAL_REGIONS, type Factor } from "./lib/model";
+import { generateForecast, type RegionId, REGIONAL_FACTORS, EVAL_REGIONS, type Factor } from "./lib/model";
+
+export type Solution = {
+  id: string;
+  title: string;
+  summary: string;
+  actions: string[];
+  commodities: ("oil" | "electricity" | "water")[];
+  regions?: RegionId[];
+  scope: RegionId;
+  relatedFactors: string[];
+  confidence: number;
+  createdAt: string;
+  updatedAt: string;
+};
 
 const ANALYTICS_POLL_MS = 60_000;
 const FACTORS_POLL_MS = 120_000;
@@ -20,6 +34,7 @@ export default function App() {
 
   const {
     prices,
+    deltas,
     jitter,
     lastUpdated,
     waterLive,
@@ -31,11 +46,12 @@ export default function App() {
     toggleLive,
   } = useLiveMarket();
 
-  const [healthStatus, setHealthStatus] = useState<"Initializing AI" | "Online Model Connected" | "Offline Model">("Initializing AI");
-  const [_onlineModelConnected, setOnlineModelConnected] = useState(false);
-  const [globalFactors, setGlobalFactors] = useState<Factor[]>(FACTORS);
-  const [regionalFactors, setRegionalFactors] = useState<Record<string, Factor[]>>({});
-  const [_regionalAnalytics, setRegionalAnalytics] = useState<Record<string, unknown>>({});
+   const [healthStatus, setHealthStatus] = useState<"Initializing AI" | "Online Model Connected" | "Offline Model">("Initializing AI");
+   const [_onlineModelConnected, setOnlineModelConnected] = useState(false);
+   const [globalFactors, setGlobalFactors] = useState<Factor[]>([]);
+   const [regionalFactors, setRegionalFactors] = useState<Record<string, Factor[]>>({});
+   const [globalSolutions, setGlobalSolutions] = useState<Solution[]>([]);
+   const [_regionalAnalytics, setRegionalAnalytics] = useState<Record<string, unknown>>({});
 
   const points = useMemo(
     () => generateForecast(prices, horizon, jitter, region),
@@ -112,7 +128,7 @@ export default function App() {
         const res = await fetch("/api/dynamic-factors");
         if (res.ok) {
           const data = await res.json();
-          if (active && Array.isArray(data.factors) && data.factors.length === 8) {
+          if (active && Array.isArray(data.factors) && data.factors.length > 0) {
             setGlobalFactors(data.factors);
           }
         }
@@ -122,12 +138,12 @@ export default function App() {
           const res = await fetch(`/api/regional-factors?region=${r.id}`);
           if (res.ok) {
             const data = await res.json();
-            if (active && Array.isArray(data.factors) && data.factors.length === 8) {
+            if (active && Array.isArray(data.factors) && data.factors.length > 0) {
               setRegionalFactors(prev => ({ ...prev, [r.id]: data.factors }));
             }
           }
         } catch { /* ignore */ }
-        await new Promise(r => setTimeout(r, REGION_STAGGER_MS));
+        await new Promise(resolve => setTimeout(resolve, REGION_STAGGER_MS));
       }
     };
     pollFactors();
@@ -135,11 +151,31 @@ export default function App() {
     return () => { active = false; clearInterval(id); };
   }, []);
 
+  // Poll solutions
+  useEffect(() => {
+    let active = true;
+    const pollSolutions = async () => {
+      try {
+        const scope = region === "global" ? "global" : region;
+         const res = await fetch(`/api/solutions?region=${scope}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (active && Array.isArray(data.solutions)) {
+            setGlobalSolutions(data.solutions);
+          }
+        }
+      } catch { /* ignore */ }
+    };
+    pollSolutions();
+    const id = setInterval(pollSolutions, FACTORS_POLL_MS);
+    return () => { active = false; clearInterval(id); };
+  }, [region]);
+
   return (
     <div className="min-h-screen bg-base font-sans text-slate-200 antialiased">
       <Navbar />
       <main>
-        <Hero prices={prices} />
+         <Hero prices={prices} deltas={deltas} />
         <ForecastTool
           horizon={horizon}
           onHorizon={setHorizon}
@@ -156,6 +192,12 @@ export default function App() {
           region={region}
           onRegion={setRegion}
         />
+        <SolutionsSection
+          globalFactors={globalFactors}
+          dynamicFactors={regionalFactors}
+          healthStatus={healthStatus}
+          globalSolutions={globalSolutions}
+        />
         <RegionalEvaluation
           prices={prices}
           horizon={horizon}
@@ -163,11 +205,6 @@ export default function App() {
           region={region}
           onRegion={setRegion}
           dynamicFactors={regionalFactors}
-          healthStatus={healthStatus}
-        />
-        <FactorsSection
-          horizon={horizon}
-          dynamicFactors={globalFactors}
           healthStatus={healthStatus}
         />
         <AboutSection />

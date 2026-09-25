@@ -17,6 +17,20 @@ export type RegionId =
   | "africa"
   | "oceania";
 
+export interface Solution {
+  id: string;
+  title: string;
+  summary: string;
+  actions: string[];
+  commodities: CommodityId[];
+  regions?: RegionId[];
+  scope: RegionId;
+  relatedFactors: string[];
+  confidence: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Commodity {
   id: CommodityId;
   name: string;
@@ -487,6 +501,15 @@ export const FACTORS: Factor[] = [
     updatedAt: new Date().toISOString(),
   },
 ];
+
+export type LivePricesResponse = {
+  oil: { price: number; unit: string; source: string; isLive: boolean };
+  electricity: { price: number; unit: string; source: string; isLive: boolean };
+  water: { price: number; unit: string; source: string; isLive: boolean };
+  asOf: string;
+  dataSource: string;
+  isLive: boolean;
+};
 
 /* ------------------------------------------------------------------ */
 /* Regional fallback factors (8 per region, 40 total)                 */

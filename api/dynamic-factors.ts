@@ -2,12 +2,11 @@ import { kiloRouter } from "./_shared/kiloRouter.js";
 import { tinyfishRouter } from "./_shared/tinyfishRouter.js";
 import { REGION_NAMES, type Region } from "./_shared/regions.js";
 import { getGlobalAnalytics, getRegionalAnalytics } from "./_shared/deterministicAnalytics.js";
-import { FACTORS_CACHE_MS, sanitizeUrl } from "./_shared/http.js";
+import { FACTOR_COUNT, FACTORS_CACHE_MS, sanitizeUrl } from "./_shared/http.js";
 import { getCache, setCache } from "./_shared/cache.js";
-import { safeParseJson, sanitizeError } from "./_shared/validation.js";
-import type { Factor } from "./_shared/types.js";
+import { safeParseJson, sanitizeError, validateFactors, validateRange, validateCategory } from "./_shared/validation.js";
+import { VALID_CATEGORIES, type Factor } from "./_shared/types.js";
 
-const MAX_FACTORS = 8;
 const SYSTEM_PROMPT_GLOBAL =
   "You are a Senior Commodity Risk Analyst. You are provided with current global market analytics, an existing list of global price factors, and fresh validated news excerpts collected through TinyFish.\n\nValidate each candidate trend against the supplied current global market conditions and source evidence.\n\nDetermine whether each candidate is a legitimate market-moving trend or noise at a global scale. Reject stale, duplicate, promotional, speculative, unsupported, irrelevant, or weakly evidenced claims.\n\nFor each legitimate trend, evaluate its expected effect on global oil, electricity, or water prices. Assign an integer importance score from 0 to 100 based on evidence quality, geographic scope, affected commodities, expected price impact, duration, and immediacy.\n\nExplain why each approved trend is legitimate and globally relevant right now. Use only the supplied analytics, factors, excerpts, and source URLs. Do not invent sources or facts.\n\nReturn strict JSON only. Do not return markdown or commentary outside JSON.\n\nThe response must contain exactly eight validated global factors matching the required schema. If a new legitimate trend is identified, include its new factor details. The deterministic server-side application logic will handle duplicate detection, importance thresholds, timestamps, and removal of the oldest factor.";
 
@@ -135,6 +134,7 @@ function normalizeFactor(raw: unknown, scope: "global" | Region, region: Region 
   const source = typeof f.source === "string" ? f.source.trim() : "";
   const id = typeof f.id === "string" && f.id.trim() ? f.id.trim() : `dynamic-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const category = typeof f.category === "string" && f.category.trim() ? f.category.trim() : "Market";
+  validateCategory(category, VALID_CATEGORIES);
   const direction = f.direction === "up" || f.direction === "down" || f.direction === "mixed" ? f.direction : "mixed";
   const magnitude = f.magnitude === "High" || f.magnitude === "Medium" || f.magnitude === "Low" ? f.magnitude : "Medium";
   const bias = f.bias === "short" || f.bias === "mid" || f.bias === "long" || f.bias === "flat" ? f.bias : "flat";
@@ -143,6 +143,7 @@ function normalizeFactor(raw: unknown, scope: "global" | Region, region: Region 
     typeof f.importanceScore === "number" && Number.isFinite(f.importanceScore)
       ? Math.max(0, Math.min(100, Math.round(f.importanceScore)))
       : 0;
+  validateRange(importanceScore, 0, 100);
   const commodities = Array.isArray(f.commodities)
     ? (f.commodities as string[]).filter((c) => c === "oil" || c === "electricity" || c === "water")
     : [];
@@ -198,19 +199,7 @@ function dedupeFactors(factors: Factor[]): Factor[] {
 function replaceOldest(factors: Factor[], incoming: Factor[]): Factor[] {
   let next = [...factors, ...incoming];
   next = dedupeFactors(next);
-  const byScope = (f: Factor) => f.scope;
-  const currentScope = (f: Factor): boolean =>
-    f.scope === "global" || (byScope(f) as string) === (incoming[0]?.scope as string);
-  next = next.filter(currentScope);
-  if (next.length > MAX_FACTORS) {
-    const oldest = next
-      .map((f) => ({ f, ts: Date.parse(f.createdAt) || 0 }))
-      .sort((a, b) => a.ts - b.ts)
-      .slice(0, next.length - MAX_FACTORS);
-    const oldestIds = new Set(oldest.map((o) => o.f.id));
-    next = next.filter((f) => !oldestIds.has(f.id));
-  }
-  return next.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, MAX_FACTORS);
+  return next.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, FACTOR_COUNT);
 }
 
 function buildFallbackFactors(scope: "global" | Region, region: Region | null): Factor[] {
@@ -225,7 +214,7 @@ function buildFallbackFactors(scope: "global" | Region, region: Region | null): 
   };
   const source = scope === "global" ? "Public market benchmarks (EIA, IEA, OPEC, UN-Water)" : `${REGION_NAMES[(region ?? "asia") as Region]} regional energy authorities and public benchmarks`;
   const commodities: Factor["commodities"] = ["oil", "electricity", "water"];
-  return names[scope].slice(0, MAX_FACTORS).map((name, i) => ({
+  return names[scope].slice(0, FACTOR_COUNT).map((name, i) => ({
     id: `fallback-${scope}-${i + 1}`,
     name,
     category: i % 3 === 0 ? "Policy" : i % 3 === 1 ? "Market" : "Structural",
@@ -244,22 +233,26 @@ function buildFallbackFactors(scope: "global" | Region, region: Region | null): 
   }));
 }
 
-async function runFactorAnalysis(scope: "global" | Region, region: Region | null): Promise<Factor[]> {
-  const current = await getCache<Factor[]>(`dynamic-factors:${scope}`, FACTORS_CACHE_MS);
-  if (current) return current;
+async function runFactorAnalysis(scope: "global" | Region, region: Region | null, abortController?: AbortController): Promise<{ factors: Factor[]; aiCurated: boolean }> {
   const analytics = scope === "global" ? await getGlobalAnalytics() : await getRegionalAnalytics(region!);
-  const existing = current ?? buildFallbackFactors(scope, region);
-  const searchQuery = (REGION_QUERIES[region ?? "asia"] ?? GLOBAL_QUERIES)[0];
-  const search = await tinyfishRouter.tinyfishSearch(`${searchQuery} ${RECENT_MONTH()}`, { limit: 10, region: region ?? undefined });
-  const candidates = search.results
+  const existing = buildFallbackFactors(scope, region);
+  const queries = scope === "global" ? GLOBAL_QUERIES : REGION_QUERIES[region ?? "asia"];
+  const signal = abortController?.signal;
+  const searches = await Promise.all(
+    queries.map((q) =>
+      tinyfishRouter.tinyfishSearch(`${q} ${RECENT_MONTH()}`, { limit: 10, region: region ?? undefined }, signal),
+    ),
+  );
+  const candidates = searches
+    .flatMap((r) => r.results)
     .map((r) => ({ ...r, snippet: typeof r.snippet === "string" ? r.snippet : "" }))
     .filter((r) => isReputableSource(r.url) && isRecentPublishedAt(r.publishedAt))
-    .slice(0, 5);
-  if (candidates.length === 0) return buildFallbackFactors(scope, region);
+    .slice(0, 15);
+  if (candidates.length === 0) return { factors: buildFallbackFactors(scope, region), aiCurated: false };
   const excerpts = await Promise.all(
     candidates.map(async (r) => {
       try {
-        const scraped = await tinyfishRouter.tinyfishScrape(r.url);
+        const scraped = await tinyfishRouter.tinyfishScrape(r.url, signal);
         return scraped
           ? { ...r, text: scraped.text, title: scraped.title || r.title }
           : r;
@@ -289,16 +282,16 @@ async function runFactorAnalysis(scope: "global" | Region, region: Region | null
     max_tokens: 4096,
     temperature: 0.2,
   };
-  const response = await kiloRouter.kiloInfer(payload);
+  const response = await kiloRouter.kiloInfer(payload, signal);
   const content = response.choices?.[0]?.message?.content ?? "";
   const parsed = safeParseJson<{ factors?: unknown[] }>(content);
-  if (!parsed?.factors) return buildFallbackFactors(scope, region);
+  if (!parsed?.factors) return { factors: buildFallbackFactors(scope, region), aiCurated: false };
   const normalized = parsed.factors
     .map((f) => normalizeFactor(f, scope, region))
     .filter((f): f is Factor => f !== null)
     .filter((f) => f.scope === scope || (scope === "global" && f.regions?.includes("global")))
-    .slice(0, MAX_FACTORS);
-  return replaceOldest(existing, normalized);
+    .slice(0, FACTOR_COUNT);
+  return { factors: replaceOldest(existing, normalized), aiCurated: true };
 }
 
 export default async function handler(req: Request): Promise<Response> {
@@ -313,14 +306,20 @@ export default async function handler(req: Request): Promise<Response> {
     }
     const cacheKey = `dynamic-factors:${scope}`;
     if (!force) {
-      const cached = await getCache<Factor[]>(cacheKey, FACTORS_CACHE_MS);
+      const cached = await getCache<{ factors: Factor[]; aiCurated: boolean }>(cacheKey, FACTORS_CACHE_MS);
       if (cached) {
-        return Response.json({ factors: cached, scope, count: cached.length, aiCurated: true, cacheKey, updatedAt: new Date().toISOString() }, { status: 200 });
+        return Response.json({ factors: cached.factors, scope, count: cached.factors.length, aiCurated: cached.aiCurated, cacheKey, updatedAt: new Date().toISOString() }, { status: 200 });
       }
     }
-    const factors = await runFactorAnalysis(scope, isGlobal ? null : scope as Region);
-    await setCache(cacheKey, factors, FACTORS_CACHE_MS);
-    return Response.json({ factors, scope, count: factors.length, aiCurated: true, cacheKey, updatedAt: new Date().toISOString() }, { status: 200 });
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => abortController.abort(), 25000);
+    try {
+      const result = await runFactorAnalysis(scope, isGlobal ? null : scope as Region, abortController);
+      await setCache(cacheKey, { factors: result.factors, aiCurated: result.aiCurated }, FACTORS_CACHE_MS);
+      return Response.json({ factors: result.factors, scope, count: result.factors.length, aiCurated: result.aiCurated, cacheKey, updatedAt: new Date().toISOString() }, { status: 200 });
+    } finally {
+      clearTimeout(timeoutId);
+    }
   } catch (error) {
     console.error("Dynamic factors error:", sanitizeError(String(error)));
     const scope = urlSafeScope(new URL(req.url));

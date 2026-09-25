@@ -183,15 +183,6 @@ function dedupeFactors(factors: Factor[]): Factor[] {
 function replaceOldest(factors: Factor[], incoming: Factor[]): Factor[] {
   let next = [...factors, ...incoming];
   next = dedupeFactors(next);
-  next = next.filter((f) => f.scope === incoming[0]?.scope);
-  if (next.length > MAX_FACTORS) {
-    const oldest = next
-      .map((f) => ({ f, ts: Date.parse(f.createdAt) || 0 }))
-      .sort((a, b) => a.ts - b.ts)
-      .slice(0, next.length - MAX_FACTORS);
-    const oldestIds = new Set(oldest.map((o) => o.f.id));
-    next = next.filter((f) => !oldestIds.has(f.id));
-  }
   return next.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, MAX_FACTORS);
 }
 
@@ -224,22 +215,25 @@ function buildFallbackFactors(scope: Region, region: Region): Factor[] {
   }));
 }
 
-async function runFactorAnalysis(scope: Region, region: Region): Promise<Factor[]> {
-  const current = await getCache<Factor[]>(`dynamic-factors:${scope}`, FACTORS_CACHE_MS);
-  if (current) return current;
+async function runFactorAnalysis(scope: Region, region: Region, abortController?: AbortController): Promise<{ factors: Factor[]; aiCurated: boolean }> {
+  const signal = abortController?.signal;
   const analytics = await getRegionalAnalytics(region);
-  const existing = current ?? buildFallbackFactors(scope, region);
-  const searchQuery = REGION_QUERIES[region][0];
-  const search = await tinyfishRouter.tinyfishSearch(`${searchQuery} ${RECENT_MONTH()}`, { limit: 10, region });
-  const candidates = search.results
+  const existing = buildFallbackFactors(scope, region);
+  const searches = await Promise.all(
+    REGION_QUERIES[region].map((q) =>
+      tinyfishRouter.tinyfishSearch(`${q} ${RECENT_MONTH()}`, { limit: 10, region }, signal),
+    ),
+  );
+  const candidates = searches
+    .flatMap((r) => r.results)
     .map((r) => ({ ...r, snippet: typeof r.snippet === "string" ? r.snippet : "" }))
     .filter((r) => isReputableSource(r.url) && isRecentPublishedAt(r.publishedAt))
-    .slice(0, 5);
-  if (candidates.length === 0) return buildFallbackFactors(scope, region);
+    .slice(0, 15);
+  if (candidates.length === 0) return { factors: buildFallbackFactors(scope, region), aiCurated: false };
   const excerpts = await Promise.all(
     candidates.map(async (r) => {
       try {
-        const scraped = await tinyfishRouter.tinyfishScrape(r.url);
+        const scraped = await tinyfishRouter.tinyfishScrape(r.url, signal);
         return scraped ? { ...r, text: scraped.text, title: scraped.title || r.title } : r;
       } catch {
         return r;
@@ -263,16 +257,16 @@ async function runFactorAnalysis(scope: Region, region: Region): Promise<Factor[
     max_tokens: 4096,
     temperature: 0.2,
   };
-  const response = await kiloRouter.kiloInfer(payload);
+  const response = await kiloRouter.kiloInfer(payload, signal);
   const content = response.choices?.[0]?.message?.content ?? "";
   const parsed = safeParseJson<{ factors?: unknown[] }>(content);
-  if (!parsed?.factors) return buildFallbackFactors(scope, region);
+  if (!parsed?.factors) return { factors: buildFallbackFactors(scope, region), aiCurated: false };
   const normalized = parsed.factors
     .map((f) => normalizeFactor(f, scope, region))
     .filter((f): f is Factor => f !== null)
     .filter((f) => f.scope === scope)
     .slice(0, MAX_FACTORS);
-  return replaceOldest(existing, normalized);
+  return { factors: replaceOldest(existing, normalized), aiCurated: true };
 }
 
 export default async function handler(req: Request): Promise<Response> {
@@ -284,21 +278,27 @@ export default async function handler(req: Request): Promise<Response> {
       return Response.json({ error: "Missing or invalid 'region' query parameter. Must be one of: asia, europe, africa, americas, oceania" }, { status: 400 });
     }
     const region = regionParam as Region;
-    const cacheKey = `dynamic-factors:${region}`;
+    const cacheKey = `regional-factors:${region}`;
     if (!force) {
-      const cached = await getCache<Factor[]>(cacheKey, FACTORS_CACHE_MS);
+      const cached = await getCache<{ factors: Factor[]; aiCurated: boolean }>(cacheKey, FACTORS_CACHE_MS);
       if (cached) {
-        return Response.json({ factors: cached, scope: region, count: cached.length, aiCurated: true, cacheKey, updatedAt: new Date().toISOString() }, { status: 200 });
+        return Response.json({ factors: cached.factors, scope: region, count: cached.factors.length, aiCurated: cached.aiCurated, cacheKey, updatedAt: new Date().toISOString() }, { status: 200 });
       }
     }
-    const factors = await runFactorAnalysis(region, region);
-    await setCache(cacheKey, factors, FACTORS_CACHE_MS);
-    return Response.json({ factors, scope: region, count: factors.length, aiCurated: true, cacheKey, updatedAt: new Date().toISOString() }, { status: 200 });
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => abortController.abort(), 10000);
+    try {
+      const result = await runFactorAnalysis(region, region, abortController);
+      await setCache(cacheKey, { factors: result.factors, aiCurated: result.aiCurated }, FACTORS_CACHE_MS);
+      return Response.json({ factors: result.factors, scope: region, count: result.factors.length, aiCurated: result.aiCurated, cacheKey, updatedAt: new Date().toISOString() }, { status: 200 });
+    } finally {
+      clearTimeout(timeoutId);
+    }
   } catch (error) {
     console.error("Regional factors error:", sanitizeError(String(error)));
     const regionParam = new URL(req.url).searchParams.get("region");
     const region = isRegion(regionParam) ? (regionParam as Region) : "asia";
     const fallback = buildFallbackFactors(region, region);
-    return Response.json({ factors: fallback, scope: region, count: fallback.length, aiCurated: false, cacheKey: `dynamic-factors:${region}`, updatedAt: new Date().toISOString(), error: "Regional factors temporarily unavailable; static fallbacks returned" }, { status: 200 });
+    return Response.json({ factors: fallback, scope: region, count: fallback.length, aiCurated: false, cacheKey: `regional-factors:${region}`, updatedAt: new Date().toISOString(), error: "Regional factors temporarily unavailable; static fallbacks returned" }, { status: 200 });
   }
 }

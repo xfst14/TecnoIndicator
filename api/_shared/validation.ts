@@ -1,4 +1,6 @@
 import { isRegion, type Region } from "./regions.js";
+import { FACTOR_COUNT, MAX_SOLUTIONS } from "./http.js";
+import type { Factor, Solution } from "./types.js";
 
 export function validateRegionParam(
   searchParams: { get: (key: string) => string | null },
@@ -40,6 +42,44 @@ export function safeParseJson<T = unknown>(text: string): T | null {
     return JSON.parse(text) as T;
   } catch {
     return null;
+  }
+}
+
+export function validateFactors(
+  arr: unknown[],
+  expectedCount = FACTOR_COUNT
+): asserts arr is Factor[] {
+  if (arr.length !== expectedCount) {
+    throw new Error(
+      `Expected ${expectedCount} factors, got ${arr.length}. All factors must be validated.`
+    );
+  }
+}
+
+export function validateSolutions(
+  arr: unknown[],
+  expectedCount = MAX_SOLUTIONS
+): asserts arr is Solution[] {
+  if (arr.length !== expectedCount) {
+    throw new Error(
+      `Expected ${expectedCount} solutions, got ${arr.length}. All solutions must be validated.`
+    );
+  }
+}
+
+export function validateRange(value: number, min: number, max: number): asserts value is number {
+  if (value < min || value > max) {
+    throw new Error(
+      `Value ${value} is outside the range [${min}, ${max}].`
+    );
+  }
+}
+
+export function validateCategory(value: string, validCategories: readonly string[]): asserts value is string {
+  if (!validCategories.includes(value)) {
+    throw new Error(
+      `Invalid category "${value}". Must be one of: ${validCategories.join(", ")}`
+    );
   }
 }
 

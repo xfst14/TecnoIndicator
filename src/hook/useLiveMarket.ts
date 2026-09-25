@@ -1,24 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   COMMODITIES,
-  fetchLiveWaterPrice,
-  perturbPrices,
-  tickPrices,
-  TICK_MS,
-  WATER_POLL_MS,
   type CommodityId,
   type LiveWaterQuote,
 } from "../lib/model";
 
-function getInitialPrices(): Record<CommodityId, number> {
-  return Object.fromEntries(COMMODITIES.map((c) => [c.id, c.base])) as Record<
-    CommodityId,
-    number
-  >;
+function getDefaultPrices(): Record<CommodityId, number> {
+  return Object.fromEntries(COMMODITIES.map((c) => [c.id, c.base])) as Record<CommodityId, number>;
 }
 
 export interface UseLiveMarketReturn {
   prices: Record<CommodityId, number>;
+  deltas: Record<CommodityId, number>;
   jitter: number;
   lastUpdated: Date;
   waterLive: LiveWaterQuote | null;
@@ -31,7 +24,8 @@ export interface UseLiveMarketReturn {
 }
 
 export function useLiveMarket(): UseLiveMarketReturn {
-  const [prices, setPrices] = useState<Record<CommodityId, number>>(getInitialPrices);
+  const [prices, setPrices] = useState<Record<CommodityId, number>>(getDefaultPrices);
+  const [deltas, setDeltas] = useState<Record<CommodityId, number>>({ oil: 0, electricity: 0, water: 0 });
   const [jitter, setJitter] = useState(0);
   const [lastUpdated, setLastUpdated] = useState(() => new Date());
   const [waterLive, setWaterLive] = useState<LiveWaterQuote | null>(null);
@@ -39,24 +33,71 @@ export function useLiveMarket(): UseLiveMarketReturn {
   const [isLive, setIsLive] = useState(true);
   const [streaming, setStreaming] = useState(true);
   const tickRef = useRef<number | null>(null);
-  const waterRef = useRef<number | null>(null);
+  const prevPricesRef = useRef<Record<CommodityId, number>>(getDefaultPrices());
 
-  const refresh = useCallback(() => {
-    setPrices((cur) => perturbPrices(cur));
-    setJitter((j) => j + Math.random());
-    setLastUpdated(new Date());
+  // Fetch prices from API
+  const fetchPrices = useCallback(async (force = false) => {
+    try {
+      const url = force ? "/api/prices?force=true" : "/api/prices";
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const newPrices = {
+        oil: data.oil.price,
+        electricity: data.electricity.price,
+        water: data.water.price,
+      };
+      // Compute real deltas from previous prices
+      setDeltas({
+        oil: (newPrices.oil - prevPricesRef.current.oil) / prevPricesRef.current.oil,
+        electricity: (newPrices.electricity - prevPricesRef.current.electricity) / prevPricesRef.current.electricity,
+        water: (newPrices.water - prevPricesRef.current.water) / prevPricesRef.current.water,
+      });
+      prevPricesRef.current = newPrices;
+      setPrices(newPrices);
+      setIsLive(data.isLive);
+      setLastUpdated(new Date(data.asOf));
+    } catch {
+      setPrices(getDefaultPrices());
+      setIsLive(false);
+    }
   }, []);
 
+  // Manual refresh - fetches with force=true
+  const refresh = useCallback(() => {
+    void fetchPrices(true);
+  }, [fetchPrices]);
+
+  // Fetch live water price from the API with force=true
   const fetchWater = useCallback(async () => {
     setWaterFetching(true);
     try {
-      const quote = await fetchLiveWaterPrice();
-      setWaterLive(quote);
-      setPrices((cur) => ({ ...cur, water: quote.price }));
-      setJitter((j) => j + Math.random());
-      setLastUpdated(new Date());
-    } catch (err) {
-      console.error("Failed to fetch live water price:", err);
+      const res = await fetch("/api/prices?force=true");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const newPrices = {
+        oil: data.oil.price,
+        electricity: data.electricity.price,
+        water: data.water.price,
+      };
+      // Compute real deltas from previous prices
+      setDeltas({
+        oil: (newPrices.oil - prevPricesRef.current.oil) / prevPricesRef.current.oil,
+        electricity: (newPrices.electricity - prevPricesRef.current.electricity) / prevPricesRef.current.electricity,
+        water: (newPrices.water - prevPricesRef.current.water) / prevPricesRef.current.water,
+      });
+      prevPricesRef.current = newPrices;
+      setPrices(newPrices);
+      setWaterLive({
+        price: data.water.price,
+        asOf: new Date(data.asOf).toLocaleTimeString("en-GB", { hour12: false }),
+        source: data.water.source || data.dataSource,
+        range: data.water.isLive ? "Live feed" : "Static benchmark",
+      });
+      setIsLive(data.isLive);
+      setLastUpdated(new Date(data.asOf));
+    } catch {
+      setWaterLive(null);
     } finally {
       setWaterFetching(false);
     }
@@ -66,16 +107,12 @@ export function useLiveMarket(): UseLiveMarketReturn {
     setIsLive((prev) => !prev);
   }, []);
 
-  // Auto-streaming mean-reverting ticks — no refresh button required
+  // Poll /api/prices every 60s when isLive is true
   useEffect(() => {
     const clear = () => {
-      if (tickRef.current) {
+      if (tickRef.current !== null) {
         clearInterval(tickRef.current);
         tickRef.current = null;
-      }
-      if (waterRef.current) {
-        clearInterval(waterRef.current);
-        waterRef.current = null;
       }
     };
 
@@ -87,18 +124,10 @@ export function useLiveMarket(): UseLiveMarketReturn {
       }
       setStreaming(true);
       tickRef.current = window.setInterval(() => {
-        setPrices((cur) => tickPrices(cur));
+        void fetchPrices();
+        // Keep jitter for forecast model compatibility
         setJitter((j) => j + 0.01);
-        setLastUpdated(new Date());
-      }, TICK_MS);
-
-      waterRef.current = window.setInterval(() => {
-        void fetchLiveWaterPrice().then((quote) => {
-          setWaterLive(quote);
-          setPrices((cur) => ({ ...cur, water: quote.price }));
-          setLastUpdated(new Date());
-        });
-      }, WATER_POLL_MS);
+      }, 60_000);
     };
 
     start();
@@ -117,16 +146,19 @@ export function useLiveMarket(): UseLiveMarketReturn {
       clear();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [isLive]);
+  }, [isLive, fetchPrices]);
 
-  // Initial water quote
+  // Initial fetch
   useEffect(() => {
+    void fetchPrices();
+    // Initial water fetch for backward compatibility
     void fetchWater();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return {
     prices,
+    deltas,
     jitter,
     lastUpdated,
     waterLive,

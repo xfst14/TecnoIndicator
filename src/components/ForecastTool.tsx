@@ -985,14 +985,13 @@ export default function ForecastTool({
                     </tbody>
                   </table>
                 </div>
-                <p className="mt-5 text-xs text-slate-500">
-                  The live feed streams automatically every 2.5s using a mean-reverting random walk,
-                  so spot prices, cards, chart, table and regional evaluation update on their own —
-                  no clicking required. It auto-pauses when the browser tab is hidden and can be
-                  paused manually. The Refresh action applies a larger one-off shock within realistic
-                  intraday ranges (oil ±3%, power ±2.5%, water ±4%), and the live water quote is
-                  re-polled every 30s within the plausible global band of roughly $2.00–$3.40/m³.
-                </p>
+                  <p className="mt-5 text-xs text-slate-500">
+                   The live feed polls /api/prices every 60 seconds, so spot prices,
+                   cards, chart, table and regional evaluation update automatically —
+                   no clicking required. It auto-pauses when the browser tab is hidden
+                   and can be paused manually. The Refresh action re-fetches prices with
+                   force=true from the API.
+                 </p>
               </div>
             )}
           </div>

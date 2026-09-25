@@ -633,8 +633,8 @@ export default function RegionalEvaluation({
                 </ul>
               </div>
 
-              {/* AI-curated regional factors */}
-              <div className="mt-5">
+{/* AI-curated regional factors */}
+               <div id="factors" className="mt-5">
                 <div className="mb-3 flex items-center justify-between">
                   <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
                     {healthStatus === "Online Model Connected"

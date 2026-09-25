@@ -65,11 +65,12 @@ export async function deleteCache(key: string): Promise<void> {
 }
 
 export async function clearCache(): Promise<void> {
+  const keys = Array.from(memoryCache.keys());
   memoryCache.clear();
   const redis = await getRedis();
   if (redis) {
     try {
-      for (const [key] of memoryCache) {
+      for (const key of keys) {
         await redis.del(`cache:${key}`);
       }
     } catch {}
@@ -88,11 +89,12 @@ export async function getCacheOrSet<T>(
     return inFlight.get(key) as Promise<T>;
   }
 
-  const promise = Promise.resolve(factory()).then(async (data) => {
-    inFlight.delete(key);
-    await setCache(key, data, ttlMs);
-    return data;
-  });
+  const promise = Promise.resolve(factory())
+    .then(async (data) => {
+      await setCache(key, data, ttlMs);
+      return data;
+    })
+    .finally(() => inFlight.delete(key));
   inFlight.set(key, promise);
   return promise;
 }

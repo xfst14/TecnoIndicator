@@ -12,12 +12,13 @@ const META: Record<
 
 interface TickerProps {
   prices: Record<CommodityId, number>;
+  deltas: Record<CommodityId, number>;
 }
 
-export default function Ticker({ prices }: TickerProps) {
+export default function Ticker({ prices, deltas }: TickerProps) {
   const items = (Object.keys(META) as CommodityId[]).map((id) => {
     const m = META[id];
-    const delta = Math.sin(prices[id] * 100) * 0.024;
+    const delta = deltas[id] ?? 0;
     const up = delta >= 0;
     return { id, ...m, price: prices[id], delta, up };
   });

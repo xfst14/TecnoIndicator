@@ -44,9 +44,8 @@ export default async function handler(req: Request): Promise<Response> {
     }
 
     const kiloStatus = await kiloRouter.getKiloStatus();
-    const aiEnabled = process.env.AI_FORECAST_ENABLED === "true";
 
-    if (!aiEnabled || !kiloStatus.available || kiloStatus.zeroCostModels.length === 0) {
+    if (!kiloStatus.available || kiloStatus.zeroCostModels.length === 0) {
       const fallback = buildRegionalForecastFallback(region);
       await setCache(cacheKey, fallback, FORECAST_CACHE_MS);
       return Response.json(fallback, { status: 200 });
@@ -122,8 +121,8 @@ export default async function handler(req: Request): Promise<Response> {
     return Response.json(validated, { status: 200 });
   } catch (error) {
     console.error("Regional forecast error:", error);
-    const region = isRegion(regionParam) ? (regionParam as Region) : "asia";
-    const fallback = buildRegionalForecastFallback(region);
+    const fallbackRegion = isRegion(regionParam) ? (regionParam as Region) : "asia";
+    const fallback = buildRegionalForecastFallback(fallbackRegion);
     return Response.json(fallback, { status: 503 });
   }
 }

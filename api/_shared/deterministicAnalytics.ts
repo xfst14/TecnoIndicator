@@ -1,4 +1,4 @@
-import { getCache, setCache } from "./cache.js";
+import { getCache, setCache, deleteCache } from "./cache.js";
 import {
   ANALYTICS_CACHE_MS,
   clamp,
@@ -148,9 +148,38 @@ export async function getRegionalAnalytics(region: Region): Promise<RegionalAnal
     return result as RegionalAnalyticsSnapshot;
 }
 
-export function clearAnalyticsCache(): void {
-    ["analytics:global", ...Object.keys(REGION_NAMES).map((r) => `analytics:regional:${r}`)].forEach((key) => {
-        const entry = (globalThis as Record<string, unknown>).__cache as Map<string, { expiresAt: number }> | undefined;
-        entry?.delete(key);
-    });
+export async function clearAnalyticsCache(): Promise<void> {
+  await Promise.all(
+    ["analytics:global", ...Object.keys(REGION_NAMES).map((r) => `analytics:regional:${r}`)].map((key) => deleteCache(key)),
+  );
+}
+
+export async function computeAnalyticsFromLivePrices(
+  input: PriceInput,
+  config: AnalyticsConfig = readConfig(),
+  dataSource: string = "Live market prices",
+  isLive: boolean = true,
+  region?: Region,
+): Promise<AnalyticsSnapshot | RegionalAnalyticsSnapshot> {
+  const dieselRatio = input.baselineDieselPrice > 0 ? (input.currentDieselPrice - input.baselineDieselPrice) / input.baselineDieselPrice : 0;
+  const electricityRatio = input.baselineElectricityTariff > 0 ? (input.currentElectricityTariff - input.baselineElectricityTariff) / input.baselineElectricityTariff : 0;
+  const waterRatio = input.baselineWaterPrice > 0 ? (input.currentWaterPrice - input.baselineWaterPrice) / input.baselineWaterPrice : 0;
+
+  const fuelLevy = dieselRatio / config.fuelFactor;
+  const electricityTariffAdjustmentIndex = electricityRatio * config.gridLossFactor;
+  const waterScarcityAdjustedPriceIndex = waterRatio * config.waterScarcityMultiplier;
+
+  const result: AnalyticsSnapshot | RegionalAnalyticsSnapshot = {
+    fuelLevy: round(clamp(fuelLevy, -50, 50), 4),
+    electricityTariffAdjustmentIndex: round(clamp(electricityTariffAdjustmentIndex, -10, 10), 4),
+    waterScarcityAdjustedPriceIndex: round(clamp(waterScarcityAdjustedPriceIndex, -10, 10), 4),
+    dataSource,
+    isLive,
+    timestamp: new Date().toISOString(),
+  };
+
+  if (region) {
+    return { ...result, region } as RegionalAnalyticsSnapshot;
+  }
+  return result as AnalyticsSnapshot;
 }
