@@ -12,6 +12,7 @@ export const KILO_KEY_ENV_NAMES = [
   "KILO_GATEWAY_KEY_3",
   "KILO_GATEWAY_KEY_4",
   "KILO_GATEWAY_KEY_5",
+  "KILO_GATEWAY_KEY",
 ] as const;
 
 export const TINYFISH_KEY_ENV_NAMES = [
@@ -38,13 +39,89 @@ export interface ConfiguredKey {
   value: string;
 }
 
-export function readConfiguredKeys(envNames: readonly string[]): ConfiguredKey[] {
-  const keys: ConfiguredKey[] = [];
-  for (const envName of envNames) {
-    const raw = process.env[envName];
-    if (typeof raw === "string" && raw.trim().length > 0) {
-      keys.push({ envName, value: raw.trim() });
+// base64url of {"alg":"HS256","typ":"JWT"} - the Kilo Gateway key header segment.
+export const KILO_GATEWAY_JWT_PREFIX = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+
+/**
+ * Normalizes a raw environment-variable API key.
+ * Env values pasted into dashboards frequently carry a trailing newline, wrapping
+ * quotes, or zero-width characters. Those survive the "non-empty" check but make the
+ * outgoing `Authorization: Bearer ...` header invalid, so the gateway answers 401.
+ */
+export function normalizeApiKey(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  let value = raw.trim();
+  if (value.length >= 2) {
+    const first = value[0];
+    const last = value[value.length - 1];
+    if ((first === "\"" && last === "\"") || (first === "'" && last === "'")) {
+      value = value.slice(1, -1).trim();
     }
+  }
+  // Strip zero-width / BOM characters, then any remaining whitespace.
+  return value.replace(/[\u200B-\u200D\u2060\uFEFF]/g, "").replace(/\s+/g, "");
+}
+
+/** True when the key is a JWT: the known HS256 header prefix plus 2 more segments. */
+export function isJwtApiKey(value: unknown): boolean {
+  const key = normalizeApiKey(value);
+  if (!key.startsWith(KILO_GATEWAY_JWT_PREFIX)) return false;
+  return key.split(".").length === 3;
+}
+
+/** True for the legacy opaque `sk-`/`sk_` key form. */
+export function isOpaqueApiKey(value: unknown): boolean {
+  return /^sk[-_][A-Za-z0-9._-]{8,}$/.test(normalizeApiKey(value));
+}
+
+/**
+ * Recognized = a key shape we know the gateway issues. Used for diagnostics and
+ * optional filtering; it is deliberately NOT a hard gate, so an unknown future key
+ * format still works.
+ */
+export function isRecognizedKiloGatewayKeyFormat(value: unknown): boolean {
+  return isJwtApiKey(value) || isOpaqueApiKey(value);
+}
+
+/** Detects unfilled template values so they are not reported as "configured". */
+export function isPlaceholderApiKey(value: unknown): boolean {
+  const key = normalizeApiKey(value).toLowerCase();
+  if (!key) return true;
+  return (
+    /^your[-_ ]?(api[-_ ]?)?key/.test(key) ||
+    /^<.*>$/.test(key) ||
+    /^\$\{.*\}$/.test(key) ||
+    /^\{\{.*\}\}$/.test(key) ||
+    /^(xxx+|changeme|change[-_]?me|placeholder|todo|replace[-_ ]?me|unset|none|null)$/.test(key)
+  );
+}
+
+export interface ReadConfiguredKeysOptions {
+  /** Return false to reject a candidate key. Omit to accept any non-placeholder key. */
+  validator?: (normalizedValue: string) => boolean;
+  /** When true, only keys with a recognized format are returned. Defaults to false. */
+  requireRecognizedFormat?: boolean;
+}
+
+export function readConfiguredKeys(
+  envNames: readonly string[],
+  options: ReadConfiguredKeysOptions = {},
+): ConfiguredKey[] {
+  const keys: ConfiguredKey[] = [];
+  // The same key may be set under several env names (for example both the bare
+  // KILO_GATEWAY_KEY and a numbered KILO_GATEWAY_KEY_N alias). Track the values
+  // already accepted so one credential never produces two key states, which would
+  // otherwise double-count `configuredKeys` and duplicate probe work.
+  const seenValues = new Set<string>();
+  for (const envName of envNames) {
+    const value = normalizeApiKey(process.env[envName]);
+    if (!value) continue;
+    if (isPlaceholderApiKey(value)) continue;
+    if (seenValues.has(value)) continue;
+    if (options.requireRecognizedFormat && !isRecognizedKiloGatewayKeyFormat(value)) continue;
+    if (options.validator && !options.validator(value)) continue;
+    seenValues.add(value);
+    keys.push({ envName, value });
   }
   return keys;
 }

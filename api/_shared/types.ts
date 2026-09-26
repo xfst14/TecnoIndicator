@@ -117,6 +117,11 @@ export interface KiloStatus {
   rateLimitedModels: string[];
   globalRateLimited: boolean;
   catalogLastRefresh: string | null;
+  keyFormats: {
+    jwt: number;
+    opaque: number;
+    unrecognized: number;
+  };
 }
 
 export interface TinyFishStatus {

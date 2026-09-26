@@ -7,6 +7,7 @@ interface HealthResponse {
     available: boolean;
     usableKeys: number;
     configuredKeys: number;
+    keyFormats?: { jwt: number; opaque: number; unrecognized: number };
   };
   tinyfish: {
     available: boolean;
@@ -47,17 +48,19 @@ interface HealthResponse {
 }
 
 export default async function handler(_req: Request): Promise<Response> {
-  // Health check uses quick mode to avoid triggering expensive initialization.
-  // Full initialization (model catalog fetch + key probing) happens lazily
-  // when actual API endpoints (solutions, dynamic-factors) are called.
+  // Health check triggers full initialization (model catalog fetch + key probing)
+  // so that the returned status accurately reflects whether a live Kilo Gateway
+  // connection is available.  The initialization is protected by the same
+  // abortController, so a cold start that exceeds the timeout will still be
+  // caught and the endpoint will return a degraded-but-informed response.
   const abortController = new AbortController();
-  const totalTimeoutId = setTimeout(() => abortController.abort(), 4000);
+  const totalTimeoutId = setTimeout(() => abortController.abort(), 10000);
 
   try {
     // Run all checks in parallel with the same abort signal
     const [kiloStatus, tinyfishStatus] = await Promise.all([
-      kiloRouter.getKiloStatus(abortController.signal, true),
-      tinyfishRouter.getTinyfishStatus(abortController.signal, true),
+      kiloRouter.getKiloStatus(abortController.signal),
+      tinyfishRouter.getTinyfishStatus(abortController.signal),
     ]);
 
     const onlineModelConnected =
@@ -72,6 +75,7 @@ export default async function handler(_req: Request): Promise<Response> {
         available: kiloStatus.available,
         usableKeys: kiloStatus.usableKeys,
         configuredKeys: kiloStatus.configuredKeys,
+        keyFormats: kiloStatus.keyFormats,
       },
       tinyfish: {
         available: tinyfishStatus.available,
@@ -126,7 +130,7 @@ export default async function handler(_req: Request): Promise<Response> {
     return Response.json({
       error: "Health check temporarily unavailable",
       onlineModelConnected: false,
-      kiloGateway: { available: false, usableKeys: 0, configuredKeys: 0 },
+      kiloGateway: { available: false, usableKeys: 0, configuredKeys: 0, keyFormats: { jwt: 0, opaque: 0, unrecognized: 0 } },
       tinyfish: { available: false, usableKeys: 0, configuredKeys: 0 },
     }, { status: 200 });
   } finally {

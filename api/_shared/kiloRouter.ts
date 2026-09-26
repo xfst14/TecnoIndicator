@@ -8,6 +8,10 @@ import {
   MODEL_CACHE_MS,
   readConfiguredKeys,
   isGlobalRateLimitStatus,
+  isJwtApiKey,
+  isOpaqueApiKey,
+  isRecognizedKiloGatewayKeyFormat,
+  KILO_GATEWAY_JWT_PREFIX,
 } from "./http.js";
 import { getCache, setCache } from "./cache.js";
 import { KiloResponse, KiloStatus } from "./types.js";
@@ -38,6 +42,8 @@ function makeId(prefix = "chatcmpl"): string {
 export interface KiloKeyState {
   keyIndex: number;
   envName: string;
+  /** Normalized key material. Never logged or exposed in any status/health response. */
+  keyValue: string;
   endpointUrl: string;
   inputPrice: number | null;
   outputPrice: number | null;
@@ -113,6 +119,7 @@ export class KiloRouter {
     this.keyStates = keys.map((key, index) => ({
       keyIndex: index,
       envName: key.envName,
+      keyValue: key.value,
       endpointUrl: KILO_GATEWAY_CHAT_URL,
       inputPrice: null,
       outputPrice: null,
@@ -126,6 +133,16 @@ export class KiloRouter {
       lastSuccessAt: null,
     }));
 
+    for (const key of keys) {
+      if (!isRecognizedKiloGatewayKeyFormat(key.value)) {
+        console.warn(
+          `Kilo Gateway key ${key.envName} does not match a recognized format ` +
+          `(expected a JWT starting with "${KILO_GATEWAY_JWT_PREFIX}" or an "sk-" key). ` +
+          `It will still be tried, but the gateway will likely reject it.`
+        );
+      }
+    }
+
 await this.refreshKiloModels(true, abortSignal);
 
     // Probe keys against eligible models in PARALLEL with a timeout.
@@ -136,12 +153,13 @@ await this.refreshKiloModels(true, abortSignal);
       eligibleModels = this.modelCandidates.filter(m => m.available && !m.rateLimited);
     }
     if (eligibleModels.length > 0) {
-      // Combine the passed abort signal with our 2s internal timeout for faster health checks
+      // Combine the passed abort signal with our 5s internal timeout. The caller's
+      // signal is still honoured, so /api/health's 4s budget continues to bound this.
       const controller = new AbortController();
       const combinedSignal = abortSignal
         ? combineAbortSignals(abortSignal, controller.signal)
         : controller.signal;
-      const overallTimeout = setTimeout(() => controller.abort(), 2000);
+      const overallTimeout = setTimeout(() => controller.abort(), 5000);
       try {
         // For each key, probe against the FIRST eligible model only (one success is enough)
         // to minimize total probe time. Run all key probes in parallel.
@@ -182,12 +200,14 @@ await this.refreshKiloModels(true, abortSignal);
       MODEL_CACHE_MS
     );
 
-    // Combine passed abort signal with our 2s internal timeout for faster health checks
+    // Combine passed abort signal with our 5s internal timeout. A short budget here
+    // latches `initialized` to true on a cold start, leaving keys permanently
+    // unavailable; the caller's signal still bounds fast paths like /api/health.
     const controller = new AbortController();
     const combinedSignal = abortSignal
       ? combineAbortSignals(abortSignal, controller.signal)
       : controller.signal;
-    const timeoutId = setTimeout(() => controller.abort(), 2000);
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
 
     try {
       if (!force && cached && Date.now() - cached.timestamp < MODEL_CACHE_MS) {
@@ -196,7 +216,7 @@ await this.refreshKiloModels(true, abortSignal);
       }
 
       try {
-        const authKey = this.keyStates[0]?.envName ? (process.env[this.keyStates[0].envName] ?? "") : "";
+        const authKey = this.keyStates[0]?.keyValue ?? "";
         if (abortSignal?.aborted) {
           throw new Error("Kilo model catalog refresh aborted");
         }
@@ -305,7 +325,7 @@ await this.refreshKiloModels(true, abortSignal);
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env[keyState.envName] ?? ""}`,
+          Authorization: `Bearer ${keyState.keyValue}`,
         },
         body: JSON.stringify({
           model: modelCandidate.modelId,
@@ -508,7 +528,7 @@ await this.refreshKiloModels(true, abortSignal);
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              Authorization: `Bearer ${process.env[keyState.envName] ?? ""}`,
+              Authorization: `Bearer ${keyState.keyValue}`,
             },
             body: JSON.stringify({
               model: modelCandidate.modelId,
@@ -651,6 +671,7 @@ const result: KiloResponse = {
       this.keyStates = keys.map((key, index) => ({
         keyIndex: index,
         envName: key.envName,
+        keyValue: key.value,
         endpointUrl: KILO_GATEWAY_CHAT_URL,
         inputPrice: null,
         outputPrice: null,
@@ -685,6 +706,11 @@ const result: KiloResponse = {
         rateLimitedModels: [],
         globalRateLimited,
         catalogLastRefresh: this.catalogLastRefresh,
+        keyFormats: {
+          jwt: this.keyStates.filter(k => isJwtApiKey(k.keyValue)).length,
+          opaque: this.keyStates.filter(k => isOpaqueApiKey(k.keyValue)).length,
+          unrecognized: this.keyStates.filter(k => !isRecognizedKiloGatewayKeyFormat(k.keyValue)).length,
+        },
       };
     }
 
@@ -719,6 +745,11 @@ const result: KiloResponse = {
       rateLimitedModels,
       globalRateLimited,
       catalogLastRefresh: this.catalogLastRefresh,
+      keyFormats: {
+        jwt: this.keyStates.filter(k => isJwtApiKey(k.keyValue)).length,
+        opaque: this.keyStates.filter(k => isOpaqueApiKey(k.keyValue)).length,
+        unrecognized: this.keyStates.filter(k => !isRecognizedKiloGatewayKeyFormat(k.keyValue)).length,
+      },
     };
   }
 
