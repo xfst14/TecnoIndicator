@@ -4,7 +4,7 @@ import { REGION_NAMES, type Region } from "./_shared/regions.js";
 import { getGlobalAnalytics, getRegionalAnalytics } from "./_shared/deterministicAnalytics.js";
 import { FACTOR_COUNT, FACTORS_CACHE_MS, sanitizeUrl } from "./_shared/http.js";
 import { getCache, setCache } from "./_shared/cache.js";
-import { safeParseJson, sanitizeError, validateFactors, validateRange, validateCategory } from "./_shared/validation.js";
+import { safeParseJson, sanitizeError, validateRange, validateCategory } from "./_shared/validation.js";
 import { VALID_CATEGORIES, type Factor } from "./_shared/types.js";
 
 const SYSTEM_PROMPT_GLOBAL =

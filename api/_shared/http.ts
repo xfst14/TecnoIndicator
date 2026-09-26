@@ -30,6 +30,7 @@ export const MODEL_CACHE_MS = 60_000;
 export const ACCESS_PROBE_CACHE_MS = 5 * 60_000;
 export const FORECAST_CACHE_MS = 5 * 60_000;
 export const SOLUTIONS_CACHE_MS = 60_000;
+export const MAX_SOLUTIONS = 3;
 export const GLOBAL_RATE_LIMIT_BACKOFF_MS = [1000, 2000, 4000];
 
 export interface ConfiguredKey {

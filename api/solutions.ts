@@ -1,9 +1,9 @@
 import { kiloRouter } from "./_shared/kiloRouter.js";
 import { tinyfishRouter } from "./_shared/tinyfishRouter.js";
 import { getGlobalAnalytics, getRegionalAnalytics } from "./_shared/deterministicAnalytics.js";
-import { SOLUTIONS_CACHE_MS, MAX_SOLUTIONS } from "./_shared/http.js";
+import { SOLUTIONS_CACHE_MS, MAX_SOLUTIONS, FACTORS_CACHE_MS } from "./_shared/http.js";
 import { getCache, setCache } from "./_shared/cache.js";
-import { safeParseJson, validateRange, validateCategory, validateFactors, validateSolutions } from "./_shared/validation.js";
+import { safeParseJson, validateSolutions } from "./_shared/validation.js";
 import { isRegion, type Region } from "./_shared/regions.js";
 import type { Factor, Solution, RegionId } from "./_shared/types.js";
 
